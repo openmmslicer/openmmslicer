@@ -1,3 +1,3 @@
+from . import conformations
 from . import integrators
-from . import parmedwrapper
 from . import SequentialEnsemble

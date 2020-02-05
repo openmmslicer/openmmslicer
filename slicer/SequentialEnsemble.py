@@ -1,32 +1,33 @@
 import copy as _copy
 import logging as _logging
-import os as _os
 import random as _random
 
+import mdtraj.reporters as _reporters
 import numpy as _np
 import openmmtools as _openmmtools
-import rdkit.Chem as _Chem
 import rdkit.Chem.rdmolops as _rdmolops
 import simtk.openmm as _openmm
 import simtk.unit as _unit
 import simtk.openmm.app as _app
-from scipy.spatial.transform import Rotation as _Rotation
 
-from slicer import parmedwrapper as _pmdwrap
+from slicer.conformations import ConformationGenerator as _ConformationGenerator
 from slicer import integrators as _integrators
 
 # Energy unit used by OpenMM unit system
 _OPENMM_ENERGY_UNIT = _unit.kilojoules_per_mole
 
 class SequentialEnsemble:
+    _read_only_properties = ["alchemical_atoms", "current_states", "lambda_", "ligand", "ligname", "structure",
+                             "rotatable_bonds"]
+
     def __init__(self, structure, integrator, platform, ligname="LIG", rotatable_bonds=None, md_config=None, alch_config=None, n_walkers=100):
         if not md_config:
             md_config = {}
         if not alch_config:
             alch_config = {}
         self._setStructure(structure, ligname=ligname)
-        self.generateAlchemicalRegion(rotatable_bonds)
         self.system = SequentialEnsemble.generateSystem(self._structure, **md_config)
+        self.generateAlchemicalRegion(rotatable_bonds)
         self.alch_system = SequentialEnsemble.generateAlchSystem(self.system, self._alchemical_atoms, **alch_config)
 
         # TODO: implement parallelism?
@@ -39,35 +40,18 @@ class SequentialEnsemble:
         self._lambda_ = 0
         self.n_walkers = n_walkers
 
-        self.deltaE_history = []
-        self.current_reduced_potentials = []
-        self.current_states = []
+        self._deltaE_history = []
+        self._weight_history = []
+        self._current_states = []
 
-    def generateConformer(self, context=None):
-        # TODO: only works correctly for single bond rotation
-        # TODO: only works for dihedral rotations
-        if not context:
-            context = self.simulation.context
-        positions = context.getState(getPositions=True).getPositions(asNumpy=True)
-        new_positions = positions.copy()
-
-        for (a1, a2) in self.rotatable_bonds:
-            # Identify vector for the rotatable bond
-            bond_vector = (positions[a2, :] - positions[a1, :]).value_in_unit(_unit.nanometers)
-            bond_vector /= _np.linalg.norm(bond_vector)
-
-            # Generate a random dihedral angle change and create rotation matrix
-            delta_phi = _np.pi * (1 - 2 * _np.random.rand())
-            rotation = _Rotation.from_rotvec(bond_vector * delta_phi)
-            origin = positions[a2, :]
-
-            for i in self.alchemical_atoms:
-                shifted_position = positions[i, :] - origin
-                new_positions[i, :] = rotation.apply(shifted_position) * positions.unit + origin
-
-            # Update context with new coordinates
-            context.setPositions(new_positions)
-            return context
+    def __getattr__(self, item):
+        if item not in self._read_only_properties:
+            return self.__getattribute__(item)
+        else:
+            try:
+                return self.__getattribute__("_" + item)
+            except AttributeError:
+                return None
 
     @classmethod
     def generateSimFromStruct(cls, structure, system, integrator, platform=None, properties=None, **kwargs):
@@ -111,48 +95,48 @@ class SequentialEnsemble:
 
         return simulation
 
-    def runSingleIteration(self, decorrelation_steps=500, equilibration_steps=100000, maximum_degeneracy=0.1, default_increment=0.1):
+    def runSingleIteration(self, decorrelation_steps=500, equilibration_steps=100000, maximum_degeneracy=0.1, default_increment=0.1, reporter_filename=None, n_conformers=None):
+        if not n_conformers:
+            n_conformers = self.n_walkers
+        decorrelation_steps = max(1, decorrelation_steps)
+        self.simulation.reporters = []
+        if reporter_filename:
+            self.simulation.reporters.append(_reporters.DCDReporter(reporter_filename, decorrelation_steps))
+
         if not self._lambda_:
             equilibration_steps = max(1, equilibration_steps)
             self.simulation.context.setVelocitiesToTemperature(self.temperature)
-            self.simulation.integrator.step(equilibration_steps)
-            for n in range(self.n_walkers):
-                self.generateConformer()
-                self.current_states += [self.simulation.context.getState(getPositions=True, getEnergy=True)]
-                self.current_reduced_potentials += [self.current_states[-1].getPotentialEnergy() / self.kT]
+            self.simulation.step(equilibration_steps)
+            confgen = _ConformationGenerator(self.system, self._structure, self.simulation.context,
+                                             self._rotatable_bonds)
+            self._current_states = confgen.generateConformers(n_conformers)
         else:
-            decorrelation_steps = max(1, decorrelation_steps)
-            for n, state in enumerate(self.current_states):
+            for n, state in enumerate(self._current_states):
                 self.simulation.context.setState(state)
                 self.simulation.context.setVelocitiesToTemperature(self.temperature)
-                self.simulation.integrator.step(decorrelation_steps)
-                self.current_states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
-                self.current_reduced_potentials[n] = self.current_states[n].getPotentialEnergy() / self.kT
+                self.simulation.step(decorrelation_steps)
+                self._current_states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
 
-        # TODO: remove debugging print statements
+        current_reduced_potentials = []
         new_reduced_potentials = []
         new_lambda = min(1, self.lambda_ + abs(default_increment))
-        for state in self.current_states:
+        for state in self._current_states:
             self._dummy_simulation.context.setState(state)
+            current_reduced_potentials += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(self.lambda_) / self.kT]
             new_reduced_potentials += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(new_lambda) / self.kT]
-        weights = _np.array(new_reduced_potentials) - _np.array(self.current_reduced_potentials)
-        weights -= _np.nanmin(weights)
-        weights = _np.exp(-weights)
+        weights = _np.array(new_reduced_potentials) - _np.array(current_reduced_potentials)
+        self._deltaE_history += [weights]
+        weights = _np.exp(_np.nanmin(weights)-weights)
         weights[weights != weights] = 0
+        weights /= sum(weights)
+        self._weight_history += [weights]
 
         # sample new states based on weights
-        self.current_states = _random.choices(self.current_states, weights=weights, k=len(self.current_states))
+        self._current_states = _random.choices(self._current_states, weights=weights, k=self.n_walkers)
 
         # update the lambda
         self._lambda_ = new_lambda
         self.simulation.integrator.setGlobalVariableByName("lambda", self._lambda_)
-
-    @property
-    def alchemical_atoms(self):
-        try:
-            return self._alchemical_atoms
-        except AttributeError:
-            return None
 
     @property
     def kT(self):
@@ -161,38 +145,6 @@ class SequentialEnsemble:
             kT = kB * self.integrator.getTemperature()
             return kT
         except:
-            return None
-
-    @property
-    def lambda_(self):
-        return self._lambda_
-
-    @property
-    def ligand(self):
-        try:
-            return self._ligand
-        except AttributeError:
-            return None
-
-    @property
-    def ligname(self):
-        try:
-            return self._ligname
-        except AttributeError:
-            return None
-
-    @property
-    def structure(self):
-        try:
-            return self._structure
-        except AttributeError:
-            return None
-
-    @property
-    def rotatable_bonds(self):
-        try:
-            return self._rotatable_bonds
-        except AttributeError:
             return None
 
     @property
@@ -213,25 +165,11 @@ class SequentialEnsemble:
         idx_rel = sum(([x.idx for x in res.atoms] for res in lig.residues if res.name == self._ligname), [])
         self._abs_to_rel = {x: y for x, y in zip(idx_abs, idx_rel)}
         self._rel_to_abs = {x: y for x, y in zip(idx_rel, idx_abs)}
-        _pmdwrap.saveFilesFromParmed(lig, ["temp.pdb"])
-        self._ligand = _Chem.MolFromPDBFile("temp.pdb", removeHs=False)
-        _os.remove("temp.pdb")
 
     def generateAlchemicalRegion(self, rotatable_bonds):
-        # TODO: rotation of more than one bond
-        if len(rotatable_bonds) != 1:
-            raise NotImplementedError("Rotation of more than one bond will be implemented in the future")
-
         self._rotatable_bonds = [(self._rel_to_abs[i], self._rel_to_abs[j]) for (i, j) in rotatable_bonds]
-
-        # fragment on the bond
-        idx, = [i for i, x in enumerate(self._ligand.GetBonds())
-                if set(rotatable_bonds[0]) == {x.GetBeginAtomIdx(), x.GetEndAtomIdx()}]
-        mol_frag = _rdmolops.FragmentOnBonds(self._ligand, [idx], addDummies=False)
-        frags = _rdmolops.GetMolFrags(mol_frag, sanitizeFrags=False)
-
-        # and get the relevant fragment
-        self._alchemical_atoms = [self._rel_to_abs[y] for y in list(*[x for x in frags if rotatable_bonds[0][1] in x])]
+        confgen = _ConformationGenerator(self.system, self._structure, None, self._rotatable_bonds)
+        self._alchemical_atoms = set().union(*list(confgen._rotatable_atoms.values()))
 
     @staticmethod
     def generateSystem(structure, **kwargs):
