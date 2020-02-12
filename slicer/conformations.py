@@ -89,19 +89,35 @@ class ConformationGenerator():
 
         return funcs
 
-    def generateConformers(self, n_conformers):
-        # we regenerate the CDFs every time because they are sensitive to the current state which we can't track
-        cdfs = self._generateInverseCDFs()
+    def generateConformers(self, n_conformers, distribution="dihedrals", sampling="semi-deterministic"):
+        if distribution == "dihedrals":
+            # we regenerate the CDFs every time because they are sensitive to the current state which we can't track
+            cdfs = self._generateInverseCDFs()
+        elif distribution == "uniform":
+            cdfs = self._generateInverseCDFs()
+            for k, (v1, v2) in cdfs.items():
+                cdfs[k] = (v1, lambda x: 2 * _np.pi * x)
+        else:
+            cdfs = distribution
+
         initial_state = self.context.getState(getPositions=True)
         new_states = []
 
+        new_angles = _np.zeros((n_conformers, len(cdfs)))
+        for i, (_, cdf) in enumerate(cdfs.values()):
+            if sampling == 'semi-deterministic':
+                offset =_np.random.uniform(0, 1 / n_conformers)
+                x_values = _np.linspace(0, 1, num=n_conformers, endpoint=False)
+                y_values = cdf(offset + x_values)
+                _np.random.shuffle(y_values)
+                new_angles[:, i] = y_values
+            elif sampling == 'stochastic':
+                new_angles[:, i] = cdf(_np.random.uniform(size=n_conformers))
+
         for n in range(n_conformers):
-            delta_phis = []
-            for bond, (dihedral, cdf) in cdfs.items():
-                new_angle = cdf(_np.random.rand()).item(0)
-                current_angle = self.measureDihedral(self.context.getState(getPositions=True), dihedral)
-                delta_phi = new_angle - current_angle
-                delta_phis += [delta_phi]
+            new_angle = new_angles[n, :]
+            current_angle = [self.measureDihedral(self.context.getState(getPositions=True), d) for d, _ in cdfs.values()]
+            delta_phis = new_angle - _np.array(current_angle)
             # we call the function only once so that the coordinates are not copied for every dihedral rotation
             self.rotateDihedrals(cdfs.keys(), delta_phis)
             new_states += [self.context.getState(getPositions=True)]
