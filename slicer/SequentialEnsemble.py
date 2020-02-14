@@ -5,6 +5,7 @@ import random as _random
 import mdtraj.reporters as _reporters
 import numpy as _np
 import openmmtools as _openmmtools
+from scipy.interpolate import interp1d as _interp1d
 from scipy.misc import comb as _comb
 from scipy.optimize import minimize as _minimize
 import simtk.openmm as _openmm
@@ -21,7 +22,8 @@ class SequentialEnsemble:
     _read_only_properties = ["alchemical_atoms", "current_states", "lambda_", "ligand", "ligname", "structure",
                              "rotatable_bonds"]
 
-    def __init__(self, structure, integrator, platform, ligname="LIG", rotatable_bonds=None, md_config=None, alch_config=None, n_walkers=100):
+    def __init__(self, structure, integrator, platform, ligname="LIG", rotatable_bonds=None, md_config=None,
+                 alch_config=None, n_walkers=100):
         if not md_config:
             md_config = {}
         if not alch_config:
@@ -96,40 +98,89 @@ class SequentialEnsemble:
 
         return simulation
 
-    def runSingleIteration(self, distribution="uniform", decorrelation_steps=500, equilibration_steps=100000, maximum_degeneracy=0.1, default_increment=0.1, reporter_filename=None, n_conformers=None):
+    def run(self, *args, **kwargs):
+        while self._lambda_ <= 1:
+            self.runSingleIteration(*args, **kwargs)
+            if self._lambda_ == 1:
+                break
+
+    def runSingleIteration(self, distribution="dihedrals", sampling="semi-deterministic", decorrelation_steps=500,
+                           equilibration_steps=100000, maximum_weight=0.05, default_increment=0.1,
+                           minimum_increment=0.01, reporter_filename=None, n_conformers=None,
+                           output_equilibration=True):
         if not n_conformers:
             n_conformers = self.n_walkers
         decorrelation_steps = max(1, decorrelation_steps)
-        self.simulation.reporters = []
-        if reporter_filename:
-            self.simulation.reporters.append(_reporters.DCDReporter(reporter_filename, decorrelation_steps))
 
+        # run either initial conformer generation or MD decorrelation
         if not self._lambda_:
             equilibration_steps = max(1, equilibration_steps)
+            if reporter_filename and output_equilibration:
+                self.simulation.reporters.append(_reporters.DCDReporter(reporter_filename.format("equil"), decorrelation_steps))
             self.simulation.context.setVelocitiesToTemperature(self.temperature)
             self.simulation.step(equilibration_steps)
             confgen = _ConformationGenerator(self.system, self._structure, self.simulation.context,
                                              self._rotatable_bonds)
-            self._current_states = confgen.generateConformers(n_conformers, distribution=distribution)
+            self._current_states = confgen.generateConformers(n_conformers, distribution=distribution, sampling=sampling)
         else:
+            if reporter_filename:
+                self.simulation.reporters.append(_reporters.DCDReporter(
+                    reporter_filename.format(round(self._lambda_, 3)), decorrelation_steps))
             for n, state in enumerate(self._current_states):
                 self.simulation.context.setState(state)
                 self.simulation.context.setVelocitiesToTemperature(self.temperature)
                 self.simulation.step(decorrelation_steps)
                 self._current_states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
+        # reset the reporters
+        self.simulation.reporters = []
 
+        # return if this is a final decorrelation step
+        if self._lambda_ == 1:
+            return
+
+        # otherwise come up with a new lambda value
+        dlambda = abs(default_increment)
+
+        # here we calculate the weights and update the lambda value iteratively if we need to
+        # maintain a maximum allowed weight
+        previous_dlambdas = [0]
+        previous_weights = [1 / len(self._current_states)]
+        calculate_initial_energy = True
         current_reduced_potentials = []
-        new_reduced_potentials = []
-        new_lambda = min(1, self.lambda_ + abs(default_increment))
-        for state in self._current_states:
-            self._dummy_simulation.context.setState(state)
-            current_reduced_potentials += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(self.lambda_) / self.kT]
-            new_reduced_potentials += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(new_lambda) / self.kT]
-        weights = _np.array(new_reduced_potentials) - _np.array(current_reduced_potentials)
-        self._deltaE_history += [weights]
-        weights = _np.exp(_np.nanmin(weights)-weights)
-        weights[weights != weights] = 0
-        weights /= sum(weights)
+        while True:
+            # calculate energies based on dlambda
+            new_reduced_potentials = []
+            new_lambda = min(1, self._lambda_ + dlambda)
+            dlambda = new_lambda - self._lambda_
+            for state in self._current_states:
+                self._dummy_simulation.context.setState(state)
+                if calculate_initial_energy:
+                    current_reduced_potentials += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(self.lambda_) / self.kT]
+                new_reduced_potentials += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(new_lambda) / self.kT]
+            calculate_initial_energy = False
+            deltaEs = _np.array(new_reduced_potentials) - _np.array(current_reduced_potentials)
+            weights = _np.exp(_np.nanmin(deltaEs)-deltaEs)
+            weights[weights != weights] = 0
+            weights /= sum(weights)
+            
+            # terminate if the maximum weight is within 10% of the user-specified limit or if we are not updating
+            # the lambda value adaptively
+            max_weight = _np.max(weights)
+            if (0.9 * maximum_weight < max_weight < 1.1 * maximum_weight) or \
+                    (max_weight < maximum_weight and new_lambda == 1) or \
+                    (maximum_weight <= 1 / len(self._current_states)):
+                break
+
+            # otherwise predict a new dlambda based on interpolation / extrapolation of previous iterations
+            # TODO: we assume always strictly increasing function - is that necessarily the case?
+            interp = _interp1d(_np.log(previous_weights + [max_weight]), previous_dlambdas + [dlambda],
+                               fill_value='extrapolate')
+            new_dlambda = interp(_np.log(maximum_weight))
+            dlambda = new_dlambda
+            if minimum_increment:
+                dlambda = max(minimum_increment, dlambda)
+
+        self._deltaE_history += [deltaEs]
         self._weight_history += [weights]
 
         # sample new states based on weights
