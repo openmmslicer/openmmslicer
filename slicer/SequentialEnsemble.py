@@ -106,10 +106,8 @@ class SequentialEnsemble:
 
     def runSingleIteration(self, distribution="dihedrals", sampling="semi-deterministic", decorrelation_steps=500,
                            equilibration_steps=100000, maximum_weight=0.05, default_increment=0.1,
-                           minimum_increment=0.01, reporter_filename=None, n_conformers=None,
+                           minimum_increment=0.01, reporter_filename=None, n_conformers_per_walker=100,
                            output_equilibration=True):
-        if not n_conformers:
-            n_conformers = self.n_walkers
         decorrelation_steps = max(1, decorrelation_steps)
 
         # run either initial conformer generation or MD decorrelation
@@ -119,18 +117,30 @@ class SequentialEnsemble:
                 self.simulation.reporters.append(_reporters.DCDReporter(reporter_filename.format("equil"), decorrelation_steps))
             self.simulation.context.setVelocitiesToTemperature(self.temperature)
             self.simulation.step(equilibration_steps)
-            confgen = _ConformationGenerator(self.system, self._structure, self.simulation.context,
-                                             self._rotatable_bonds)
-            self._current_states = confgen.generateConformers(n_conformers, distribution=distribution, sampling=sampling)
-        else:
-            if reporter_filename:
-                self.simulation.reporters.append(_reporters.DCDReporter(
-                    reporter_filename.format(round(self._lambda_, 3)), decorrelation_steps))
-            for n, state in enumerate(self._current_states):
-                self.simulation.context.setState(state)
-                self.simulation.context.setVelocitiesToTemperature(self.temperature)
-                self.simulation.step(decorrelation_steps)
+            self._current_states = [self.simulation.context.getState(getPositions=True, getEnergy=True)] * self.n_walkers
+            self.simulation.reporters = []
+
+        if reporter_filename:
+            self.simulation.reporters.append(_reporters.DCDReporter(
+                reporter_filename.format(round(self._lambda_, 3)), decorrelation_steps))
+        extra_conformations = []
+        for n, state in enumerate(self._current_states):
+            self.simulation.context.setState(state)
+            self.simulation.context.setVelocitiesToTemperature(self.temperature)
+            self.simulation.step(decorrelation_steps)
+            self._current_states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
+            if not self._lambda_:
+                confgen = _ConformationGenerator(self.system, self._structure, self.simulation.context,
+                                                 self._rotatable_bonds)
+                extra_conformations += confgen.generateConformers(n_conformers_per_walker,
+                                                                  distribution=distribution,
+                                                                  sampling=sampling)
+            else:
                 self._current_states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
+
+        if not self._lambda_:
+            self._current_states = extra_conformations
+
         # reset the reporters
         self.simulation.reporters = []
 
