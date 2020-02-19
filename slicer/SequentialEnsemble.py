@@ -1,19 +1,17 @@
 import copy as _copy
 import logging as _logging
-import random as _random
 
 import mdtraj.reporters as _reporters
 import numpy as _np
 import openmmtools as _openmmtools
 from scipy.interpolate import interp1d as _interp1d
-from scipy.misc import comb as _comb
-from scipy.optimize import minimize as _minimize
 import simtk.openmm as _openmm
 import simtk.unit as _unit
 import simtk.openmm.app as _app
 
 from slicer.conformations import ConformationGenerator as _ConformationGenerator
 from slicer import integrators as _integrators
+from slicer.sampling import MaximumEntropyResampler as _MaximumEntropyResampler
 
 # Energy unit used by OpenMM unit system
 _OPENMM_ENERGY_UNIT = _unit.kilojoules_per_mole
@@ -194,7 +192,7 @@ class SequentialEnsemble:
         self._weight_history += [weights]
 
         # sample new states based on weights
-        integer_weights = self.minimumVarianceResampling(weights, n_walkers=self.n_walkers)
+        integer_weights = _MaximumEntropyResampler.resample(weights, n_walkers=self.n_walkers)[0]
         self._current_states = sum([int(i) * [x] for i, x in zip(integer_weights, self._current_states)], [])
 
         # update the lambda
@@ -416,56 +414,3 @@ class SequentialEnsemble:
 
         alch_system = factory.create_alchemical_system(system, alch_region)
         return alch_system
-
-    @staticmethod
-    def minimumVarianceResampling(weights, n_walkers=None, discrete_superensemble_size=50, minimum_weight=0.001):
-        weights = _np.array(weights)
-        weights /= sum(weights)
-        if not n_walkers:
-            n_walkers = weights.shape[0]
-
-        exact_walkers = n_walkers * weights
-        integer_walkers = _np.floor(exact_walkers)
-        n_residual_walkers = int(n_walkers - sum(integer_walkers))
-
-        if n_residual_walkers:
-            walkers_ensemble = []
-            weights_ensemble = _np.array([])
-
-            def minfunc(input):
-                input = _np.abs(input)
-                input /= _np.sum(_np.abs(input))
-                average_weights = _np.sum([i * walker for i, walker in zip(input, walkers_ensemble)], axis=0)
-                return _np.average(_np.abs(average_weights - residual_probabilities))
-
-            # we partition the rest of the walkers equally between the walkers with highest residual probabilities
-            residual_probabilities = exact_walkers - integer_walkers
-            current_residuals = residual_probabilities[:]
-
-            discrete_superensemble_size = int(min(_comb(weights.shape[0], n_residual_walkers), discrete_superensemble_size))
-            for i in range(discrete_superensemble_size):
-                residual_walkers = _np.zeros(len(weights))
-                sorted_residuals_indices = _np.argsort(current_residuals)[::-1] # descending
-                residual_walkers[sorted_residuals_indices[:n_residual_walkers]] = 1
-                sorted_residuals = current_residuals[sorted_residuals_indices]
-                creation_annihilation_pairs = min(len(sorted_residuals[sorted_residuals < 0]), len(sorted_residuals[sorted_residuals > 0]))
-                for j in range(creation_annihilation_pairs):
-                    if sorted_residuals[n_residual_walkers + j] > -sorted_residuals[-(j + 1)]:
-                        residual_walkers[sorted_residuals_indices[n_residual_walkers + j]] = 1
-                        residual_walkers[sorted_residuals_indices[-(j + 1)]] = -1
-                    else:
-                        break
-
-                walkers_ensemble += [residual_walkers]
-                minim = _minimize(minfunc, _np.append(weights_ensemble, [1 / (1 + len(weights_ensemble))]), method="L-BFGS-B")
-                weights_ensemble = _np.abs(minim.x)
-                weights_ensemble /= _np.sum(weights_ensemble)
-                average_weights = _np.sum([w * walker for w, walker in zip(weights_ensemble, walkers_ensemble)], axis=0)
-                current_residuals = residual_probabilities - average_weights
-                if min(weights_ensemble) < minimum_weight:
-                    break
-
-            chosen_walkers, = _random.choices(walkers_ensemble, weights_ensemble)
-            integer_walkers += chosen_walkers
-
-        return integer_walkers
