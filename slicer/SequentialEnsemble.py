@@ -11,7 +11,7 @@ import simtk.openmm.app as _app
 
 from slicer.conformations import ConformationGenerator as _ConformationGenerator
 from slicer import integrators as _integrators
-from slicer.sampling import MaximumEntropyResampler as _MaximumEntropyResampler
+import slicer.resampling as _resampling
 
 # Energy unit used by OpenMM unit system
 _OPENMM_ENERGY_UNIT = _unit.kilojoules_per_mole
@@ -102,7 +102,8 @@ class SequentialEnsemble:
             if self._lambda_ == 1:
                 break
 
-    def runSingleIteration(self, distribution="dihedrals", sampling="semi-deterministic", decorrelation_steps=500,
+    def runSingleIteration(self, distribution="dihedrals", sampling="semi-deterministic",
+                           resampler=_resampling.SystematicResampler, decorrelation_steps=500,
                            equilibration_steps=100000, maximum_weight=0.05, default_increment=0.1,
                            minimum_increment=0.01, reporter_filename=None, n_conformers_per_walker=100,
                            output_equilibration=True):
@@ -192,8 +193,7 @@ class SequentialEnsemble:
         self._weight_history += [weights]
 
         # sample new states based on weights
-        integer_weights = _MaximumEntropyResampler.resample(weights, n_walkers=self.n_walkers)[0]
-        self._current_states = sum([int(i) * [x] for i, x in zip(integer_weights, self._current_states)], [])
+        self._current_states = resampler.resample(self._current_states, weights, n_walkers=self.n_walkers)[0]
 
         # update the lambda
         self._lambda_ = new_lambda
