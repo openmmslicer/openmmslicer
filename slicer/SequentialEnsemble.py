@@ -4,13 +4,14 @@ import logging as _logging
 import mdtraj.reporters as _reporters
 import numpy as _np
 import openmmtools as _openmmtools
-from scipy.interpolate import interp1d as _interp1d
+import pybobyqa as _pybobyqa
 import simtk.openmm as _openmm
 import simtk.unit as _unit
 import simtk.openmm.app as _app
 
 from slicer.conformations import ConformationGenerator as _ConformationGenerator
 from slicer import integrators as _integrators
+import slicer.metrics as _metrics
 import slicer.resampling as _resampling
 
 # Energy unit used by OpenMM unit system
@@ -21,7 +22,7 @@ class SequentialEnsemble:
                              "rotatable_bonds"]
 
     def __init__(self, structure, integrator, platform, ligname="LIG", rotatable_bonds=None, md_config=None,
-                 alch_config=None, n_walkers=100):
+                 alch_config=None):
         if not md_config:
             md_config = {}
         if not alch_config:
@@ -32,6 +33,7 @@ class SequentialEnsemble:
         self.alch_system = SequentialEnsemble.generateAlchSystem(self.system, self._alchemical_atoms, **alch_config)
 
         # TODO: implement parallelism?
+        self.platform = platform
         self.integrator = _copy.copy(integrator)
         self.simulation = self.generateSimFromStruct(structure, self.alch_system, self.integrator, platform=platform)
         # this is only used for energy evaluation
@@ -39,8 +41,7 @@ class SequentialEnsemble:
                                                             _integrators.DummyAlchemicalIntegrator(), platform=platform)
 
         self._lambda_ = 0
-        self.n_walkers = n_walkers
-
+        self._lambda_history = [0]
         self._deltaE_history = []
         self._weight_history = []
         self._current_states = []
@@ -102,10 +103,21 @@ class SequentialEnsemble:
             if self._lambda_ == 1:
                 break
 
-    def runSingleIteration(self, distribution="dihedrals", sampling="semi-deterministic",
-                           resampler=_resampling.SystematicResampler, decorrelation_steps=500,
-                           equilibration_steps=100000, maximum_weight=0.05, default_increment=0.1,
-                           minimum_increment=0.01, reporter_filename=None, n_conformers_per_walker=100,
+    def runSingleIteration(self,
+                           distribution="dihedrals",
+                           sampling="semi-deterministic",
+                           resampler=_resampling.SystematicResampler,
+                           resampling_metric=_metrics.LogEffectiveSampleSize,
+                           target_metric_value=None,
+                           target_metric_tol=None,
+                           maximum_metric_evaluations=10,
+                           default_dlambda=0.1,
+                           minimum_increment=1e-8,
+                           decorrelation_steps=500,
+                           equilibration_steps=100000,
+                           reporter_filename=None,
+                           n_walkers=1000,
+                           n_conformers_per_walker=100,
                            output_equilibration=True):
         decorrelation_steps = max(1, decorrelation_steps)
 
@@ -116,7 +128,7 @@ class SequentialEnsemble:
                 self.simulation.reporters.append(_reporters.DCDReporter(reporter_filename.format("equil"), decorrelation_steps))
             self.simulation.context.setVelocitiesToTemperature(self.temperature)
             self.simulation.step(equilibration_steps)
-            self._current_states = [self.simulation.context.getState(getPositions=True, getEnergy=True)] * self.n_walkers
+            self._current_states = [self.simulation.context.getState(getPositions=True, getEnergy=True)] * n_walkers
             self.simulation.reporters = []
 
         if reporter_filename:
@@ -147,57 +159,58 @@ class SequentialEnsemble:
         if self._lambda_ == 1:
             return
 
-        # otherwise come up with a new lambda value
-        dlambda = abs(default_increment)
+        # here we evaluate the baseline reduced energies
+        self._current_reduced_potentials = self._calculateStateEnergies(self.lambda_)
 
-        # here we calculate the weights and update the lambda value iteratively if we need to
-        # maintain a maximum allowed weight
-        previous_dlambdas = [0]
-        previous_weights = [1 / len(self._current_states)]
-        calculate_initial_energy = True
-        current_reduced_potentials = []
-        while True:
-            # calculate energies based on dlambda
-            new_reduced_potentials = []
-            new_lambda = min(1, self._lambda_ + dlambda)
-            dlambda = new_lambda - self._lambda_
-            for state in self._current_states:
-                self._dummy_simulation.context.setState(state)
-                if calculate_initial_energy:
-                    current_reduced_potentials += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(self.lambda_) / self.kT]
-                new_reduced_potentials += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(new_lambda) / self.kT]
-            calculate_initial_energy = False
-            deltaEs = _np.array(new_reduced_potentials) - _np.array(current_reduced_potentials)
-            weights = _np.exp(_np.nanmin(deltaEs)-deltaEs)
-            weights[weights != weights] = 0
-            weights /= sum(weights)
-            
-            # terminate if the maximum weight is within 10% of the user-specified limit or if we are not updating
-            # the lambda value adaptively
-            max_weight = _np.max(weights)
-            if (0.9 * maximum_weight < max_weight < 1.1 * maximum_weight) or \
-                    (max_weight < maximum_weight and new_lambda == 1) or \
-                    (maximum_weight <= 1 / len(self._current_states)):
-                break
+        self._current_deltaEs = {}
+        self._current_weights = {}
 
-            # otherwise predict a new dlambda based on interpolation / extrapolation of previous iterations
-            # TODO: we assume always strictly increasing function - is that necessarily the case?
-            interp = _interp1d(_np.log(previous_weights + [max_weight]), previous_dlambdas + [dlambda],
-                               fill_value='extrapolate')
-            new_dlambda = interp(_np.log(maximum_weight))
-            dlambda = new_dlambda
-            if minimum_increment:
-                dlambda = max(minimum_increment, dlambda)
+        # this is the function we are going to minimise
+        def evaluateWeights(dlambda):
+            new_lambda = float(min(1., self._lambda_ + dlambda))
+            self._new_reduced_potentials = self._calculateStateEnergies(new_lambda)
+            self._current_deltaEs[new_lambda] = self._new_reduced_potentials - self._current_reduced_potentials
+            self._current_weights[new_lambda] = _np.exp(_np.nanmin(self._current_deltaEs[new_lambda]) - self._current_deltaEs[new_lambda])
+            self._current_weights[new_lambda][self._current_weights[new_lambda] != self._current_weights[new_lambda]] = 0
+            self._current_weights[new_lambda] /= sum(self._current_weights[new_lambda])
+            return abs(resampling_metric.evaluate(self._current_weights[new_lambda]) - target_metric_value)
 
-        self._deltaE_history += [deltaEs]
-        self._weight_history += [weights]
+        if resampler and resampling_metric:
+            if target_metric_value is None:
+                target_metric_value = resampling_metric.defaultValue(n_walkers)
+            if target_metric_tol is None:
+                target_metric_tol = resampling_metric.defaultTol(n_walkers)
+
+            # minimise and set optimal lambda value adaptively if possible
+            if len(self._lambda_history) > 1:
+                initial_dlambda = min(1. - self._lambda_history[-1],
+                                      self._lambda_history[-1] - self._lambda_history[-2])
+            else:
+                initial_dlambda = min(1. - self._lambda_history[-1], default_dlambda)
+            minimiser = _pybobyqa.solve(evaluateWeights, [initial_dlambda], rhobeg=default_dlambda,
+                                        # we put the bounds slightly higher than one so that we don't get e.g. 0.99994
+                                        bounds=([minimum_increment], [1.01 - self._lambda_]),
+                                        seek_global_minimum=False,
+                                        maxfun=1+maximum_metric_evaluations,
+                                        scaling_within_bounds=True,
+                                        user_params={"model.abs_tol": target_metric_value * target_metric_tol})
+            self._lambda_ = float(min(1., self._lambda_ + minimiser.x[0]))
+        else:
+            # else use default_dlambda
+            target_metric_value = 0
+            evaluateWeights(default_dlambda)
+            self._lambda_ = float(min(1., self._lambda_ + default_dlambda))
+
+        # update histories and lambdas
+        self._lambda_history += [self._lambda_]
+        self.simulation.integrator.setGlobalVariableByName("lambda", self._lambda_)
+        self._current_deltaEs = self._current_deltaEs[self._lambda_]
+        self._current_weights = self._current_weights[self._lambda_]
+        self._deltaE_history += [self._current_deltaEs]
+        self._weight_history += [self._current_weights]
 
         # sample new states based on weights
-        self._current_states = resampler.resample(self._current_states, weights, n_walkers=self.n_walkers)[0]
-
-        # update the lambda
-        self._lambda_ = new_lambda
-        self.simulation.integrator.setGlobalVariableByName("lambda", self._lambda_)
+        self._current_states = resampler.resample(self._current_states, self._current_weights, n_walkers=n_walkers)[0]
 
     @property
     def kT(self):
@@ -209,12 +222,24 @@ class SequentialEnsemble:
             return None
 
     @property
+    def n_walkers(self):
+        return len(self._current_states)
+
+    @property
     def temperature(self):
         try:
             T = self.integrator.getTemperature()
             return T
         except:
             return None
+
+    def _calculateStateEnergies(self, lambda_):
+        # evaluate energies at each state at the given lambda
+        energies = []
+        for state in self._current_states:
+            self._dummy_simulation.context.setState(state)
+            energies += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(lambda_) / self.kT]
+        return _np.array(energies)
 
     def _setStructure(self, struct, ligname="LIG"):
         self._structure = struct
