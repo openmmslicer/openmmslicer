@@ -9,9 +9,9 @@ class AlchemicalLangevinIntegrator(_LangevinIntegrator):
     def __init__(self, *args, alchemical_functions=None, initial_lambda=0, **kwargs):
         if not alchemical_functions:
             alchemical_functions = {
-                'lambda_sterics': 'min(2*lambda, 1)',
-                'lambda_electrostatics': 'max(0, 2*lambda-1)',
-                'lambda_torsions': '1',
+                'lambda_sterics': 'min(1.25*lambda, 1)',
+                'lambda_electrostatics': 'max(0, 5*lambda-4)',
+                'lambda_torsions': 'min(1.25*lambda, 1)',
             }
 
         self._alchemical_functions = alchemical_functions
