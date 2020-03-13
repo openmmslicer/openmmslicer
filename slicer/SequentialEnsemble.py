@@ -5,6 +5,7 @@ import mdtraj.reporters as _reporters
 import numpy as _np
 import openmmtools as _openmmtools
 import pybobyqa as _pybobyqa
+from scipy.special import logsumexp as _logsumexp
 import simtk.openmm as _openmm
 import simtk.unit as _unit
 import simtk.openmm.app as _app
@@ -47,6 +48,8 @@ class SequentialEnsemble:
         self._deltaE_history = []
         self._weight_history = []
         self._current_states = []
+
+        self.lnZ = 0
 
     def __getattr__(self, item):
         if item not in self._read_only_properties:
@@ -205,13 +208,14 @@ class SequentialEnsemble:
             evaluateWeights(default_dlambda)
             self._lambda_ = float(min(1., self._lambda_ + default_dlambda))
 
-        # update histories and lambdas
+        # update histories, lambdas, and partition functions
         self._lambda_history += [self._lambda_]
         self.simulation.integrator.setGlobalVariableByName("lambda", self._lambda_)
         self._current_deltaEs = self._current_deltaEs[self._lambda_]
         self._current_weights = self._current_weights[self._lambda_]
         self._deltaE_history += [self._current_deltaEs]
         self._weight_history += [self._current_weights]
+        self.lnZ += _logsumexp(self._current_deltaEs)
 
         # sample new states based on weights
         self._current_states = resampler.resample(self._current_states, self._current_weights, n_walkers=n_walkers)[0]
