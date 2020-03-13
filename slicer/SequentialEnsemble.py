@@ -112,7 +112,7 @@ class SequentialEnsemble:
                            distribution="dihedrals",
                            sampling="semi-deterministic",
                            resampler=_resampling.SystematicResampler,
-                           resampling_metric=_metrics.LogEffectiveSampleSize,
+                           resampling_metric=_metrics.LogWorstCaseSampleSize,
                            target_metric_value=None,
                            target_metric_value_initial=None,
                            target_metric_tol=None,
