@@ -352,7 +352,7 @@ class SequentialEnsemble:
                            softcore_f=2,
                            alchemical_torsions=True,
                            annihilate_electrostatics=True,
-                           annihilate_sterics=False,
+                           annihilate_sterics=True,
                            disable_alchemical_dispersion_correction=True,
                            alchemical_pme_treatment='direct-space',
                            suppress_warnings=True,
