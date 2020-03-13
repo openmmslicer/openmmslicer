@@ -21,7 +21,7 @@ class SequentialEnsemble:
     _read_only_properties = ["alchemical_atoms", "current_states", "lambda_", "ligand", "ligname", "structure",
                              "rotatable_bonds"]
 
-    def __init__(self, structure, integrator, platform, ligname="LIG", rotatable_bonds=None, md_config=None,
+    def __init__(self, structure, integrator, platform, ligname="LIG", rotatable_bonds=None, npt=True, md_config=None,
                  alch_config=None):
         if not md_config:
             md_config = {}
@@ -31,6 +31,8 @@ class SequentialEnsemble:
         self.system = SequentialEnsemble.generateSystem(self._structure, **md_config)
         self.generateAlchemicalRegion(rotatable_bonds)
         self.alch_system = SequentialEnsemble.generateAlchSystem(self.system, self._alchemical_atoms, **alch_config)
+        if npt:
+            self.alch_system = self.addBarostat(self.alch_system)
 
         # TODO: implement parallelism?
         self.platform = platform
@@ -439,3 +441,30 @@ class SequentialEnsemble:
 
         alch_system = factory.create_alchemical_system(system, alch_region)
         return alch_system
+
+    @classmethod
+    def addBarostat(cls, system, temperature=298 * _unit.kelvin, pressure=1 * _unit.atmospheres, frequency=25, **kwargs):
+        """
+        Adds a MonteCarloBarostat to the MD system.
+
+        Parameters
+        ----------
+        system : openmm.System
+            The OpenMM System object corresponding to the reference system.
+        temperature : float, default=300
+            temperature (Kelvin) to be simulated at.
+        pressure : int, configional, default=None
+            Pressure (atm) for Barostat for NPT simulations.
+        frequency : int, default=25
+            Frequency at which Monte Carlo pressure changes should be attempted (in time steps)
+
+        Returns
+        -------
+        system : openmm.System
+            The OpenMM System with the MonteCarloBarostat attached.
+        """
+        #logger.info('Adding MonteCarloBarostat with {}. MD simulation will be {} NPT.'.format(pressure, temperature))
+        # Add Force Barostat to the system
+        print("adding barostat")
+        system.addForce(_openmm.MonteCarloBarostat(pressure, temperature, frequency))
+        return system
