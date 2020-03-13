@@ -111,6 +111,7 @@ class SequentialEnsemble:
                            resampler=_resampling.SystematicResampler,
                            resampling_metric=_metrics.LogEffectiveSampleSize,
                            target_metric_value=None,
+                           target_metric_value_initial=None,
                            target_metric_tol=None,
                            maximum_metric_evaluations=10,
                            default_dlambda=0.1,
@@ -143,6 +144,7 @@ class SequentialEnsemble:
             self.simulation.step(decorrelation_steps)
             self._current_states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
             if not self._lambda_:
+                target_metric_value = target_metric_value_initial
                 confgen = _ConformationGenerator(self.system, self._structure, self.simulation.context,
                                                  self._rotatable_bonds)
                 extra_conformations += confgen.generateConformers(n_conformers_per_walker,
