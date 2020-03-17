@@ -29,13 +29,13 @@ ensemble = SequentialEnsemble(structure, integrator, platform, rotatable_bonds=r
 ensemble.simulation.minimizeEnergy()
 
 # run simulation
-ensemble.runSingleIteration(equilibration_steps=100000,
-                            n_walkers=1000,
-                            n_conformers_per_walker=25,
-                            resampling_metric=LogWorstCaseSampleSize,
-                            target_metric_value=np.log(100),
-                            target_metric_value_initial=np.log(2500),
-                            distribution="uniform",
-                            decorrelation_steps=500,
-                            default_dlambda=0.1,
-                            reporter_filename=output_dcd_template)
+ensemble.run(equilibration_steps=100000,
+             n_walkers=1000,
+             n_conformers_per_walker=25,
+             resampling_metric=LogWorstCaseSampleSize,
+             target_metric_value=np.log(100),
+             target_metric_value_initial=np.log(2500),
+             distribution="uniform",
+             decorrelation_steps=500,
+             default_dlambda=0.1,
+             reporter_filename=output_dcd_template)
