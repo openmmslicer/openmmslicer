@@ -215,7 +215,7 @@ class SequentialEnsemble:
         self._current_weights = self._current_weights[self._lambda_]
         self._deltaE_history += [self._current_deltaEs]
         self._weight_history += [self._current_weights]
-        self.lnZ += _logsumexp(self._current_deltaEs)
+        self.lnZ += _logsumexp(self._current_deltaEs) - _np.log(self._current_deltaEs.shape[0])
 
         # sample new states based on weights
         self._current_states = resampler.resample(self._current_states, self._current_weights, n_walkers=n_walkers)[0]
