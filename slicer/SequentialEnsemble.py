@@ -41,7 +41,7 @@ class SequentialEnsemble:
         self.simulation = self.generateSimFromStruct(structure, self.alch_system, self.integrator, platform=platform)
         # this is only used for energy evaluation
         self._dummy_simulation = self.generateSimFromStruct(structure, self.alch_system,
-                                                            _integrators.DummyAlchemicalIntegrator(), platform=platform)
+                                                            _integrators.AlchemicalEnergyEvaluator(), platform=platform)
 
         self._lambda_ = 0
         self._lambda_history = [0]
@@ -49,7 +49,7 @@ class SequentialEnsemble:
         self._weight_history = []
         self._current_states = []
 
-        self.lnZ = 0
+        self.logZ = 0
 
     def __getattr__(self, item):
         if item not in self._read_only_properties:
@@ -116,9 +116,9 @@ class SequentialEnsemble:
                            target_metric_value=None,
                            target_metric_value_initial=None,
                            target_metric_tol=None,
-                           maximum_metric_evaluations=10,
+                           maximum_metric_evaluations=20,
                            default_dlambda=0.1,
-                           minimum_increment=1e-8,
+                           minimum_dlambda=0.01,
                            decorrelation_steps=500,
                            equilibration_steps=100000,
                            reporter_filename=None,
@@ -182,7 +182,7 @@ class SequentialEnsemble:
             self._current_weights[new_lambda] /= sum(self._current_weights[new_lambda])
             return abs(resampling_metric.evaluate(self._current_weights[new_lambda]) - target_metric_value)
 
-        if resampling_method and resampling_metric:
+        if resampling_method:
             if target_metric_value is None:
                 target_metric_value = resampling_metric.defaultValue(n_walkers)
             if target_metric_tol is None:
@@ -196,7 +196,7 @@ class SequentialEnsemble:
                 initial_dlambda = min(1. - self._lambda_history[-1], default_dlambda)
             minimiser = _pybobyqa.solve(evaluateWeights, [initial_dlambda], rhobeg=default_dlambda,
                                         # we put the bounds slightly higher than one so that we don't get e.g. 0.99994
-                                        bounds=([minimum_increment], [1.01 - self._lambda_]),
+                                        bounds=([minimum_dlambda], [1.01 - self._lambda_]),
                                         seek_global_minimum=False,
                                         maxfun=1+maximum_metric_evaluations,
                                         scaling_within_bounds=True,
@@ -215,7 +215,7 @@ class SequentialEnsemble:
         self._current_weights = self._current_weights[self._lambda_]
         self._deltaE_history += [self._current_deltaEs]
         self._weight_history += [self._current_weights]
-        self.lnZ += _logsumexp(self._current_deltaEs) - _np.log(self._current_deltaEs.shape[0])
+        self.logZ += _logsumexp(self._current_deltaEs) - _np.log(self._current_deltaEs.shape[0])
 
         # sample new states based on weights
         self._current_states = resampling_method.resample(self._current_states, self._current_weights, n_walkers=n_walkers)[0]
@@ -415,7 +415,7 @@ class SequentialEnsemble:
         Returns
         -------
         alch_system : alchemical_system
-            System to be used for the NCMC simulation.
+            System to be used for the SMC simulation.
 
         References
         ----------
@@ -457,7 +457,7 @@ class SequentialEnsemble:
         ----------
         system : openmm.System
             The OpenMM System object corresponding to the reference system.
-        temperature : float, default=300
+        temperature : float, default=298
             temperature (Kelvin) to be simulated at.
         pressure : int, configional, default=None
             Pressure (atm) for Barostat for NPT simulations.
