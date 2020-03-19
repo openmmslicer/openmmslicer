@@ -31,6 +31,8 @@ class SequentialEnsemble:
         self._setStructure(structure, ligname=ligname)
         self.system = SequentialEnsemble.generateSystem(self._structure, **md_config)
         self.generateAlchemicalRegion(rotatable_bonds)
+        if not "alchemical_torsions" in alch_config.keys():
+            alch_config["alchemical_torsions"] = self._alchemical_dihedral_indices
         self.alch_system = SequentialEnsemble.generateAlchSystem(self.system, self._alchemical_atoms, **alch_config)
         if npt:
             self.alch_system = self.addBarostat(self.alch_system)
@@ -264,6 +266,9 @@ class SequentialEnsemble:
         self._rotatable_bonds = [(self._rel_to_abs[i], self._rel_to_abs[j]) for (i, j) in rotatable_bonds]
         confgen = _ConformationGenerator(self.system, self._structure, None, self._rotatable_bonds)
         self._alchemical_atoms = set().union(*list(confgen._rotatable_atoms.values()))
+        all_rotatable_dihedral_atoms = set().union(*[set(x) for x in self._rotatable_bonds])
+        self._alchemical_dihedral_indices = [i for i, d in enumerate(self._structure.dihedrals) if not d.improper and
+                                             {d.atom2.idx, d.atom3.idx}.issubset(all_rotatable_dihedral_atoms)]
 
     @staticmethod
     def generateSystem(structure, **kwargs):
