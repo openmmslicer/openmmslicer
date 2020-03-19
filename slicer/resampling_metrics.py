@@ -6,11 +6,11 @@ def transform(func):
     def decorator(cls_orig):
         @classmethod
         def defaultValue(cls, n_weights):
-            return func(super(cls, cls).defaultValue(n_weights))
+            return func(super(cls_orig, cls).defaultValue(n_weights))
 
         @classmethod
         def evaluate(cls, weights):
-            return func(super(cls, cls).evaluate(weights))
+            return func(super(cls_orig, cls).evaluate(weights))
 
         cls_orig.defaultValue = defaultValue
         cls_orig.evaluate = evaluate
@@ -65,10 +65,6 @@ class LogWorstCaseSystematicSampleSize(WorstCaseSystematicSampleSize):
 
 
 class ExpWeightEntropy(EffectiveSampleSize):
-    @classmethod
-    def defaultValue(cls, weights):
-        return 0.1
-
     @classmethod
     def evaluate(cls, weights):
         weights = _np.asarray(weights, dtype=_np.float32)

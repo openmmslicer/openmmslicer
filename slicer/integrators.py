@@ -1,11 +1,11 @@
-from openmmtools.integrators import LangevinIntegrator as _LangevinIntegrator
+import openmmtools.integrators as _integrators
 import simtk.unit as _unit
 
 # Energy unit used by OpenMM unit system
 _OPENMM_ENERGY_UNIT = _unit.kilojoules_per_mole
 
 
-class AlchemicalLangevinIntegrator(_LangevinIntegrator):
+def make_alchemical(cls):
     def __init__(self, *args, alchemical_functions=None, initial_lambda=0, **kwargs):
         if not alchemical_functions:
             alchemical_functions = {
@@ -15,30 +15,32 @@ class AlchemicalLangevinIntegrator(_LangevinIntegrator):
             }
 
         self._alchemical_functions = alchemical_functions
-        self._system_parameters = {system_parameter for system_parameter in alchemical_functions.keys()}
-        self._lambda_ = initial_lambda
-
-        super(AlchemicalLangevinIntegrator, self).__init__(*args, **kwargs)
-
+        super(cls, self).__init__(*args, **kwargs)
         self.addGlobalVariable("lambda", initial_lambda)
 
     def _add_integrator_steps(self):
         self._add_update_alchemical_parameters_step()
-        super(AlchemicalLangevinIntegrator, self)._add_integrator_steps()
+        super(cls, self)._add_integrator_steps()
 
     def _add_update_alchemical_parameters_step(self):
-        """
-        Add step to update Context parameters according to provided functions.
-        """
-        for context_parameter in self._alchemical_functions:
-            if context_parameter in self._system_parameters:
-                self.addComputeGlobal(context_parameter, self._alchemical_functions[context_parameter])
+        for key, value in self._alchemical_functions.items():
+            self.addComputeGlobal(key, value)
+
+    cls.__init__ = __init__
+    cls._add_integrator_steps = _add_integrator_steps
+    cls._add_update_alchemical_parameters_step = _add_update_alchemical_parameters_step
+
+    return cls
 
 
+@make_alchemical
+class AlchemicalLangevinIntegrator(_integrators.LangevinIntegrator):
+    pass
 
-class DummyAlchemicalIntegrator(AlchemicalLangevinIntegrator):
+
+class AlchemicalEnergyEvaluator(AlchemicalLangevinIntegrator):
     def __init__(self, *args, **kwargs):
-        super(DummyAlchemicalIntegrator, self).__init__(*args, **kwargs)
+        super(AlchemicalEnergyEvaluator, self).__init__(*args, **kwargs)
         self.addGlobalVariable("potential", 0)
 
     def _add_integrator_steps(self):
