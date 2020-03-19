@@ -12,8 +12,8 @@ import simtk.openmm.app as _app
 
 from slicer.conformations import ConformationGenerator as _ConformationGenerator
 from slicer import integrators as _integrators
-import slicer.metrics as _metrics
-import slicer.resampling as _resampling
+import slicer.resampling_metrics as _resmetrics
+import slicer.resampling_methods as _resmethods
 
 # Energy unit used by OpenMM unit system
 _OPENMM_ENERGY_UNIT = _unit.kilojoules_per_mole
@@ -111,8 +111,8 @@ class SequentialEnsemble:
     def runSingleIteration(self,
                            distribution="dihedrals",
                            sampling="semi-deterministic",
-                           resampler=_resampling.SystematicResampler,
-                           resampling_metric=_metrics.LogWorstCaseSampleSize,
+                           resampling_method=_resmethods.SystematicResampler,
+                           resampling_metric=_resmetrics.LogWorstCaseSampleSize,
                            target_metric_value=None,
                            target_metric_value_initial=None,
                            target_metric_tol=None,
@@ -182,7 +182,7 @@ class SequentialEnsemble:
             self._current_weights[new_lambda] /= sum(self._current_weights[new_lambda])
             return abs(resampling_metric.evaluate(self._current_weights[new_lambda]) - target_metric_value)
 
-        if resampler and resampling_metric:
+        if resampling_method and resampling_metric:
             if target_metric_value is None:
                 target_metric_value = resampling_metric.defaultValue(n_walkers)
             if target_metric_tol is None:
@@ -218,7 +218,7 @@ class SequentialEnsemble:
         self.lnZ += _logsumexp(self._current_deltaEs) - _np.log(self._current_deltaEs.shape[0])
 
         # sample new states based on weights
-        self._current_states = resampler.resample(self._current_states, self._current_weights, n_walkers=n_walkers)[0]
+        self._current_states = resampling_method.resample(self._current_states, self._current_weights, n_walkers=n_walkers)[0]
 
     @property
     def kT(self):
@@ -471,6 +471,5 @@ class SequentialEnsemble:
         """
         #logger.info('Adding MonteCarloBarostat with {}. MD simulation will be {} NPT.'.format(pressure, temperature))
         # Add Force Barostat to the system
-        print("adding barostat")
         system.addForce(_openmm.MonteCarloBarostat(pressure, temperature, frequency))
         return system

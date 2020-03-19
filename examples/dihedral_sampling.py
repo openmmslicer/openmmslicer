@@ -1,5 +1,5 @@
 from slicer.integrators import AlchemicalLangevinIntegrator
-from slicer.metrics import LogWorstCaseSampleSize
+from slicer.resampling_metrics import LogWorstCaseSampleSize
 from slicer.SequentialEnsemble import SequentialEnsemble
 
 import numpy as np
