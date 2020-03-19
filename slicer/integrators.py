@@ -38,6 +38,11 @@ class AlchemicalLangevinIntegrator(_integrators.LangevinIntegrator):
     pass
 
 
+@make_alchemical
+class AlchemicalGeodesicBAOABIntegrator(_integrators.GeodesicBAOABIntegrator):
+    pass
+
+
 class AlchemicalEnergyEvaluator(AlchemicalLangevinIntegrator):
     def __init__(self, *args, **kwargs):
         super(AlchemicalEnergyEvaluator, self).__init__(*args, **kwargs)
