@@ -1,5 +1,7 @@
 import copy as _copy
+import inspect as _inspect
 import logging as _logging
+import os as _os
 
 import mdtraj.reporters as _reporters
 import numpy as _np
@@ -14,9 +16,8 @@ from slicer.conformations import ConformationGenerator as _ConformationGenerator
 from slicer import integrators as _integrators
 import slicer.resampling_metrics as _resmetrics
 import slicer.resampling_methods as _resmethods
+import slicer.sampling_metrics as _sammetrics
 
-# Energy unit used by OpenMM unit system
-_OPENMM_ENERGY_UNIT = _unit.kilojoules_per_mole
 
 class SequentialEnsemble:
     _read_only_properties = ["alchemical_atoms", "current_states", "lambda_", "ligand", "ligname", "structure",
@@ -35,6 +36,7 @@ class SequentialEnsemble:
             alch_config["alchemical_torsions"] = self._alchemical_dihedral_indices
         self.alch_system = SequentialEnsemble.generateAlchSystem(self.system, self._alchemical_atoms, **alch_config)
         if npt:
+            # TODO: this doesn't work correctly for temperatures != 298 K
             self.alch_system = self.addBarostat(self.alch_system)
 
         # TODO: implement parallelism?
@@ -49,7 +51,7 @@ class SequentialEnsemble:
         self._lambda_history = [0]
         self._deltaE_history = []
         self._weight_history = []
-        self._current_states = []
+        self.current_states = []
 
         self.logZ = 0
 
@@ -113,6 +115,7 @@ class SequentialEnsemble:
     def runSingleIteration(self,
                            distribution="dihedrals",
                            sampling="semi-deterministic",
+                           sampling_metric=_sammetrics.DeltaEnergyCorrelation,
                            resampling_method=_resmethods.SystematicResampler,
                            resampling_metric=_resmetrics.LogWorstCaseSampleSize,
                            target_metric_value=None,
@@ -121,96 +124,126 @@ class SequentialEnsemble:
                            maximum_metric_evaluations=20,
                            default_dlambda=0.1,
                            minimum_dlambda=0.01,
-                           decorrelation_steps=500,
+                           default_decorrelation_steps=500,
+                           maximum_decorrelation_steps=5000,
                            equilibration_steps=100000,
                            reporter_filename=None,
                            n_walkers=1000,
                            n_conformers_per_walker=100,
                            output_equilibration=True):
-        decorrelation_steps = max(1, decorrelation_steps)
+        if _inspect.isclass(sampling_metric):
+            sampling_metric = sampling_metric(self)
+        default_decorrelation_steps = max(1, default_decorrelation_steps)
 
         # run either initial conformer generation or MD decorrelation
         if not self._lambda_:
             equilibration_steps = max(1, equilibration_steps)
             if reporter_filename and output_equilibration:
-                self.simulation.reporters.append(_reporters.DCDReporter(reporter_filename.format("equil"), decorrelation_steps))
+                self.simulation.reporters.append(_reporters.DCDReporter(reporter_filename.format("equil"),
+                                                                        default_decorrelation_steps))
             self.simulation.context.setVelocitiesToTemperature(self.temperature)
             self.simulation.step(equilibration_steps)
-            self._current_states = [self.simulation.context.getState(getPositions=True, getEnergy=True)] * n_walkers
+            self.current_states = [self.simulation.context.getState(getPositions=True, getEnergy=True)] * n_walkers
             self.simulation.reporters = []
 
-        if reporter_filename:
-            self.simulation.reporters.append(_reporters.DCDReporter(
-                reporter_filename.format(round(self._lambda_, 3)), decorrelation_steps))
-        extra_conformations = []
-        for n, state in enumerate(self._current_states):
-            self.simulation.context.setState(state)
-            self.simulation.context.setVelocitiesToTemperature(self.temperature)
-            self.simulation.step(decorrelation_steps)
-            self._current_states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
+
+        # adaptively set decorrelation time, if needed
+        if self._lambda_ and sampling_metric:
+            sampling_metric.evaluateBefore()
+        elapsed_steps = 0
+        while True:
+            extra_conformations = []
+            if reporter_filename:
+                current_reporter_filename = reporter_filename.format(round(self._lambda_, 3))
+                if _os.path.exists(current_reporter_filename):
+                    _os.remove(current_reporter_filename)
+                    self.simulation.reporters = []
+                self.simulation.reporters.append(_reporters.DCDReporter(current_reporter_filename,
+                                                                        default_decorrelation_steps))
+
+            # sample
+            for n, state in enumerate(self.current_states):
+                self.simulation.context.setState(state)
+                self.simulation.context.setVelocitiesToTemperature(self.temperature)
+                self.simulation.step(default_decorrelation_steps)
+                self.current_states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
+                if not self._lambda_:
+                    # TODO: restructure ConformationGenerator to make it cleaner and move it out of the loop
+                    target_metric_value = target_metric_value_initial
+                    confgen = _ConformationGenerator(self.system, self._structure, self.simulation.context,
+                                                     self._rotatable_bonds)
+                    extra_conformations += confgen.generateConformers(n_conformers_per_walker,
+                                                                      distribution=distribution,
+                                                                      sampling=sampling)
+                else:
+                    self.current_states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
+            elapsed_steps += default_decorrelation_steps
+
             if not self._lambda_:
-                target_metric_value = target_metric_value_initial
-                confgen = _ConformationGenerator(self.system, self._structure, self.simulation.context,
-                                                 self._rotatable_bonds)
-                extra_conformations += confgen.generateConformers(n_conformers_per_walker,
-                                                                  distribution=distribution,
-                                                                  sampling=sampling)
+                self.current_states = extra_conformations
+
+            # reset the reporters
+            self.simulation.reporters = []
+
+            # return if this is a final decorrelation step
+            if self._lambda_ == 1:
+                return
+
+            # here we evaluate the baseline reduced energies
+            self._current_reduced_potentials = self.calculateStateEnergies(self.lambda_)
+
+            self._current_deltaEs = {}
+            self._current_weights = {}
+
+            # this is the function we are going to minimise
+            def evaluateWeights(dlambda):
+                new_lambda = float(min(1., self._lambda_ + dlambda))
+                self._new_reduced_potentials = self.calculateStateEnergies(new_lambda)
+                self._current_deltaEs[new_lambda] = self._new_reduced_potentials - self._current_reduced_potentials
+                self._current_weights[new_lambda] = _np.exp(
+                    _np.nanmin(self._current_deltaEs[new_lambda]) - self._current_deltaEs[new_lambda])
+                self._current_weights[new_lambda][
+                    self._current_weights[new_lambda] != self._current_weights[new_lambda]] = 0
+                self._current_weights[new_lambda] /= sum(self._current_weights[new_lambda])
+                return abs(resampling_metric.evaluate(self._current_weights[new_lambda]) - target_metric_value)
+
+            # evaluate next lambda value
+            if resampling_method:
+                if target_metric_value is None:
+                    target_metric_value = resampling_metric.defaultValue(n_walkers)
+                if target_metric_tol is None:
+                    target_metric_tol = resampling_metric.defaultTol(n_walkers)
+
+                # minimise and set optimal lambda value adaptively if possible
+                if len(self._lambda_history) > 1:
+                    initial_dlambda = min(1. - self._lambda_history[-1],
+                                          self._lambda_history[-1] - self._lambda_history[-2])
+                else:
+                    initial_dlambda = min(1. - self._lambda_history[-1], default_dlambda)
+                minimiser = _pybobyqa.solve(evaluateWeights, [initial_dlambda], rhobeg=default_dlambda,
+                                            # we put the bounds slightly higher than one so that we don't get e.g. 0.99994
+                                            bounds=([minimum_dlambda], [1.01 - self._lambda_]),
+                                            seek_global_minimum=False,
+                                            maxfun=1 + maximum_metric_evaluations,
+                                            scaling_within_bounds=True,
+                                            user_params={"model.abs_tol": target_metric_value * target_metric_tol})
+                self.next_lambda_ = float(min(1., self._lambda_ + minimiser.x[0]))
             else:
-                self._current_states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
+                # else use default_dlambda
+                target_metric_value = 0
+                evaluateWeights(default_dlambda)
+                self.next_lambda_ = float(min(1., self._lambda_ + default_dlambda))
 
-        if not self._lambda_:
-            self._current_states = extra_conformations
-
-        # reset the reporters
-        self.simulation.reporters = []
-
-        # return if this is a final decorrelation step
-        if self._lambda_ == 1:
-            return
-
-        # here we evaluate the baseline reduced energies
-        self._current_reduced_potentials = self._calculateStateEnergies(self.lambda_)
-
-        self._current_deltaEs = {}
-        self._current_weights = {}
-
-        # this is the function we are going to minimise
-        def evaluateWeights(dlambda):
-            new_lambda = float(min(1., self._lambda_ + dlambda))
-            self._new_reduced_potentials = self._calculateStateEnergies(new_lambda)
-            self._current_deltaEs[new_lambda] = self._new_reduced_potentials - self._current_reduced_potentials
-            self._current_weights[new_lambda] = _np.exp(_np.nanmin(self._current_deltaEs[new_lambda]) - self._current_deltaEs[new_lambda])
-            self._current_weights[new_lambda][self._current_weights[new_lambda] != self._current_weights[new_lambda]] = 0
-            self._current_weights[new_lambda] /= sum(self._current_weights[new_lambda])
-            return abs(resampling_metric.evaluate(self._current_weights[new_lambda]) - target_metric_value)
-
-        if resampling_method:
-            if target_metric_value is None:
-                target_metric_value = resampling_metric.defaultValue(n_walkers)
-            if target_metric_tol is None:
-                target_metric_tol = resampling_metric.defaultTol(n_walkers)
-
-            # minimise and set optimal lambda value adaptively if possible
-            if len(self._lambda_history) > 1:
-                initial_dlambda = min(1. - self._lambda_history[-1],
-                                      self._lambda_history[-1] - self._lambda_history[-2])
-            else:
-                initial_dlambda = min(1. - self._lambda_history[-1], default_dlambda)
-            minimiser = _pybobyqa.solve(evaluateWeights, [initial_dlambda], rhobeg=default_dlambda,
-                                        # we put the bounds slightly higher than one so that we don't get e.g. 0.99994
-                                        bounds=([minimum_dlambda], [1.01 - self._lambda_]),
-                                        seek_global_minimum=False,
-                                        maxfun=1+maximum_metric_evaluations,
-                                        scaling_within_bounds=True,
-                                        user_params={"model.abs_tol": target_metric_value * target_metric_tol})
-            self._lambda_ = float(min(1., self._lambda_ + minimiser.x[0]))
-        else:
-            # else use default_dlambda
-            target_metric_value = 0
-            evaluateWeights(default_dlambda)
-            self._lambda_ = float(min(1., self._lambda_ + default_dlambda))
+            # continue decorrelation if metric says so and break otherwise
+            if self._lambda_ and sampling_metric:
+                sampling_metric.evaluateAfter()
+                if not sampling_metric.terminateSampling and elapsed_steps < maximum_decorrelation_steps:
+                    sampling_metric.reset()
+                    continue
+            break
 
         # update histories, lambdas, and partition functions
+        self._lambda_ = self.next_lambda_
         self._lambda_history += [self._lambda_]
         self.simulation.integrator.setGlobalVariableByName("lambda", self._lambda_)
         self._current_deltaEs = self._current_deltaEs[self._lambda_]
@@ -220,7 +253,7 @@ class SequentialEnsemble:
         self.logZ += _logsumexp(self._current_deltaEs) - _np.log(self._current_deltaEs.shape[0])
 
         # sample new states based on weights
-        self._current_states = resampling_method.resample(self._current_states, self._current_weights, n_walkers=n_walkers)[0]
+        self.current_states = resampling_method.resample(self.current_states, self._current_weights, n_walkers=n_walkers)[0]
 
     @property
     def kT(self):
@@ -233,7 +266,7 @@ class SequentialEnsemble:
 
     @property
     def n_walkers(self):
-        return len(self._current_states)
+        return len(self.current_states)
 
     @property
     def temperature(self):
@@ -243,13 +276,15 @@ class SequentialEnsemble:
         except:
             return None
 
-    def _calculateStateEnergies(self, lambda_):
+    def calculateStateEnergies(self, lambda_, states=None):
+        if states is None:
+            states = self.current_states
         # evaluate energies at each state at the given lambda
         energies = []
-        for state in self._current_states:
+        for state in states:
             self._dummy_simulation.context.setState(state)
             energies += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(lambda_) / self.kT]
-        return _np.array(energies)
+        return _np.asarray(energies, dtype=_np.float32)
 
     def _setStructure(self, struct, ligname="LIG"):
         self._structure = struct

@@ -1,9 +1,6 @@
 import openmmtools.integrators as _integrators
 import simtk.unit as _unit
 
-# Energy unit used by OpenMM unit system
-_OPENMM_ENERGY_UNIT = _unit.kilojoules_per_mole
-
 
 def make_alchemical(cls):
     def __init__(self, *args, alchemical_functions=None, initial_lambda=0, **kwargs):
@@ -55,4 +52,4 @@ class AlchemicalEnergyEvaluator(AlchemicalLangevinIntegrator):
     def getPotentialEnergyFromLambda(self, lambda_):
         self.setGlobalVariableByName("lambda", lambda_)
         self.step(1)
-        return self.getGlobalVariableByName("potential") * _OPENMM_ENERGY_UNIT
+        return self.getGlobalVariableByName("potential") * _unit.kilojoules_per_mole
