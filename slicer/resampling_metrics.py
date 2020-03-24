@@ -26,7 +26,7 @@ class EffectiveSampleSize:
 
     @classmethod
     def defaultTol(cls, n_weights):
-        return 1e-2
+        return 0.1 / n_weights
 
     @classmethod
     def evaluate(cls, weights):

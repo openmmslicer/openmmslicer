@@ -6,14 +6,14 @@ import os as _os
 import mdtraj.reporters as _reporters
 import numpy as _np
 import openmmtools as _openmmtools
-import pybobyqa as _pybobyqa
 from scipy.special import logsumexp as _logsumexp
 import simtk.openmm as _openmm
 import simtk.unit as _unit
 import simtk.openmm.app as _app
 
 from slicer.conformations import ConformationGenerator as _ConformationGenerator
-from slicer import integrators as _integrators
+import slicer.integrators as _integrators
+from slicer.minimise import GreedyBisectingMinimiser as _GreedyBisectingMinimiser
 import slicer.resampling_metrics as _resmetrics
 import slicer.resampling_methods as _resmethods
 import slicer.sampling_metrics as _sammetrics
@@ -196,16 +196,14 @@ class SequentialEnsemble:
             self._current_weights = {}
 
             # this is the function we are going to minimise
-            def evaluateWeights(dlambda):
-                new_lambda = float(min(1., self._lambda_ + dlambda))
+            def evaluateWeights(lambda_):
+                new_lambda = float(min(1., lambda_))
                 self._new_reduced_potentials = self.calculateStateEnergies(new_lambda)
                 self._current_deltaEs[new_lambda] = self._new_reduced_potentials - self._current_reduced_potentials
-                self._current_weights[new_lambda] = _np.exp(
-                    _np.nanmin(self._current_deltaEs[new_lambda]) - self._current_deltaEs[new_lambda])
-                self._current_weights[new_lambda][
-                    self._current_weights[new_lambda] != self._current_weights[new_lambda]] = 0
+                self._current_weights[new_lambda] = _np.exp(_np.nanmin(self._current_deltaEs[new_lambda]) - self._current_deltaEs[new_lambda])
+                self._current_weights[new_lambda][self._current_weights[new_lambda] != self._current_weights[new_lambda]] = 0
                 self._current_weights[new_lambda] /= sum(self._current_weights[new_lambda])
-                return abs(resampling_metric.evaluate(self._current_weights[new_lambda]) - target_metric_value)
+                return resampling_metric.evaluate(self._current_weights[new_lambda])
 
             # evaluate next lambda value
             if resampling_method:
@@ -215,24 +213,15 @@ class SequentialEnsemble:
                     target_metric_tol = resampling_metric.defaultTol(n_walkers)
 
                 # minimise and set optimal lambda value adaptively if possible
-                if len(self._lambda_history) > 1:
-                    initial_dlambda = min(1. - self._lambda_history[-1],
-                                          self._lambda_history[-1] - self._lambda_history[-2])
-                else:
-                    initial_dlambda = min(1. - self._lambda_history[-1], default_dlambda)
-                minimiser = _pybobyqa.solve(evaluateWeights, [initial_dlambda], rhobeg=default_dlambda,
-                                            # we put the bounds slightly higher than one so that we don't get e.g. 0.99994
-                                            bounds=([minimum_dlambda], [1.01 - self._lambda_]),
-                                            seek_global_minimum=False,
-                                            maxfun=1 + maximum_metric_evaluations,
-                                            scaling_within_bounds=True,
-                                            user_params={"model.abs_tol": target_metric_value * target_metric_tol})
-                self.next_lambda_ = float(min(1., self._lambda_ + minimiser.x[0]))
+                minimum_lambda = self._lambda_ if minimum_dlambda is None else min(1., self._lambda_ + minimum_dlambda)
+                self.next_lambda_ = _GreedyBisectingMinimiser.minimise(evaluateWeights, target_metric_value,
+                                                                       minimum_lambda, 1., tol=target_metric_tol,
+                                                                       maxfun=maximum_metric_evaluations)
             else:
                 # else use default_dlambda
                 target_metric_value = 0
-                evaluateWeights(default_dlambda)
-                self.next_lambda_ = float(min(1., self._lambda_ + default_dlambda))
+                self.next_lambda_ = min(1., self._lambda_ + default_dlambda)
+                evaluateWeights(self.next_lambda_)
 
             # continue decorrelation if metric says so and break otherwise
             if self._lambda_ and sampling_metric:
