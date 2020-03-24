@@ -89,7 +89,7 @@ class ConformationGenerator():
 
         return funcs
 
-    def generateConformers(self, n_conformers, distribution="dihedrals", sampling="semi-deterministic"):
+    def generateConformers(self, n_conformers, distribution="uniform", sampling="semi-deterministic"):
         if distribution == "dihedrals":
             # we regenerate the CDFs every time because they are sensitive to the current state which we can't track
             cdfs = self._generateInverseCDFs()

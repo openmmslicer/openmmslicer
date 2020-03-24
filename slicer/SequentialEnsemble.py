@@ -113,7 +113,7 @@ class SequentialEnsemble:
                 break
 
     def runSingleIteration(self,
-                           distribution="dihedrals",
+                           distribution="uniform",
                            sampling="semi-deterministic",
                            sampling_metric=_sammetrics.DeltaEnergyCorrelation,
                            resampling_method=_resmethods.SystematicResampler,
