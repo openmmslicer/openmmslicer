@@ -213,9 +213,10 @@ class SequentialEnsemble:
                     target_metric_tol = resampling_metric.defaultTol(n_walkers)
 
                 # minimise and set optimal lambda value adaptively if possible
-                minimum_lambda = self._lambda_ if minimum_dlambda is None else min(1., self._lambda_ + minimum_dlambda)
+                pivot_y = resampling_metric.evaluate([1 / len(self.current_states)] * len(self.current_states))
                 self.next_lambda_ = _GreedyBisectingMinimiser.minimise(evaluateWeights, target_metric_value,
-                                                                       minimum_lambda, 1., tol=target_metric_tol,
+                                                                       self._lambda_, 1., pivot_y=pivot_y,
+                                                                       minimum_x=minimum_dlambda, tol=target_metric_tol,
                                                                        maxfun=maximum_metric_evaluations)
             else:
                 # else use default_dlambda
