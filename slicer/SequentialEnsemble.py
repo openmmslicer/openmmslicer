@@ -385,7 +385,7 @@ class SequentialEnsemble:
                            softcore_a=1,
                            softcore_b=1,
                            softcore_c=6,
-                           softcore_beta=0.0,
+                           softcore_beta=0.5,
                            softcore_d=1,
                            softcore_e=1,
                            softcore_f=2,
