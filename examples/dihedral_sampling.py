@@ -1,8 +1,7 @@
 from slicer.integrators import AlchemicalLangevinIntegrator
-from slicer.resampling_metrics import LogWorstCaseSampleSize
+from slicer.resampling_metrics import WorstCaseSystematicSampleSize
 from slicer.SequentialEnsemble import SequentialEnsemble
 
-import numpy as np
 import parmed as pmd
 import simtk.unit as unit
 import simtk.openmm.app as app
@@ -32,9 +31,9 @@ ensemble.simulation.minimizeEnergy()
 ensemble.run(equilibration_steps=100000,
              n_walkers=1000,
              n_conformers_per_walker=25,
-             resampling_metric=LogWorstCaseSampleSize,
-             target_metric_value=np.log(100),
-             target_metric_value_initial=np.log(2500),
+             resampling_metric=WorstCaseSystematicSampleSize,
+             target_metric_value=100,
+             target_metric_value_initial=2500,
              distribution="uniform",
              decorrelation_steps=500,
              default_dlambda=0.1,
