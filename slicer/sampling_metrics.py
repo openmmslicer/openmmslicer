@@ -1,5 +1,3 @@
-import copy as _copy
-
 import scipy.stats as _ss
 
 
@@ -40,14 +38,3 @@ class EnergyCorrelation:
     def reset(self):
         self.E_before = []
         self.E_after = []
-
-
-class DeltaEnergyCorrelation(EnergyCorrelation):
-    def evaluateBefore(self):
-        self.initial_states = _copy.copy(self.ensemble.current_states)
-
-    def evaluateAfter(self):
-        self.E_before = self.ensemble.calculateStateEnergies(self.ensemble.next_lambda_, states=self.initial_states) - \
-                        self.ensemble.calculateStateEnergies(self.ensemble.lambda_, states=self.initial_states)
-        self.E_after = self.ensemble.calculateStateEnergies(self.ensemble.next_lambda_) - \
-                       self.ensemble.calculateStateEnergies(self.ensemble.lambda_)
