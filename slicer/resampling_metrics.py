@@ -5,7 +5,7 @@ from scipy.stats import entropy as _entropy
 class EffectiveSampleSize:
     @classmethod
     def defaultValue(cls, n_weights):
-        return n_weights / 2
+        return n_weights / 5
 
     @classmethod
     def defaultTol(cls, n_weights):

@@ -1,5 +1,5 @@
 from slicer.integrators import AlchemicalLangevinIntegrator
-from slicer.resampling_metrics import WorstCaseSystematicSampleSize
+from slicer.resampling_metrics import WorstCaseSampleSize
 from slicer.SequentialEnsemble import SequentialEnsemble
 
 import parmed as pmd
@@ -31,7 +31,7 @@ ensemble.simulation.minimizeEnergy()
 ensemble.run(equilibration_steps=100000,
              n_walkers=1000,
              n_conformers_per_walker=25,
-             resampling_metric=WorstCaseSystematicSampleSize,
+             resampling_metric=WorstCaseSampleSize,
              target_metric_value=100,
              target_metric_value_initial=2500,
              distribution="uniform",

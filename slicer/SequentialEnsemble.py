@@ -117,7 +117,7 @@ class SequentialEnsemble:
                            sampling="semi-deterministic",
                            sampling_metric=_sammetrics.EnergyCorrelation,
                            resampling_method=_resmethods.SystematicResampler,
-                           resampling_metric=_resmetrics.WorstCaseSystematicSampleSize,
+                           resampling_metric=_resmetrics.WorstCaseSampleSize,
                            target_metric_value=None,
                            target_metric_value_initial=None,
                            target_metric_tol=None,
