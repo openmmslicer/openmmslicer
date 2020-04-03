@@ -89,7 +89,31 @@ class ConformationGenerator():
 
         return funcs
 
-    def generateConformers(self, n_conformers, distribution="uniform", sampling="semi-deterministic"):
+    def applyTransformations(self, rotatable_bonds, delta_phis, context=None):
+        if context is None:
+            context = self.context
+
+        positions = context.getState(getPositions=True).getPositions(asNumpy=True)
+        all_states = []
+
+        for n in range(len(delta_phis)):
+            new_positions = positions.copy()
+            for rotatable_bond, delta_phi in zip(rotatable_bonds, delta_phis[n]):
+                # we always rotate the atoms attached to rotatable_bond[1]
+                bond_vector = (positions[rotatable_bond[0], :] - positions[rotatable_bond[1], :]).value_in_unit(_unit.nanometers)
+                bond_vector /= _np.linalg.norm(bond_vector)
+                rotation = _Rotation.from_rotvec(bond_vector * delta_phi)
+                origin = positions[rotatable_bond[1], :]
+                rotatable_atoms = self._rotatable_atoms[rotatable_bond]
+                for i in rotatable_atoms:
+                    shifted_position = positions[i, :] - origin
+                    new_positions[i, :] = rotation.apply(shifted_position) * positions.unit + origin
+            context.setPositions(new_positions)
+            all_states += [context.getState(getPositions=True)]
+
+        return all_states
+
+    def generateTransformations(self, n_conformers, distribution="uniform", sampling="systematic"):
         if distribution == "dihedrals":
             # we regenerate the CDFs every time because they are sensitive to the current state which we can't track
             cdfs = self._generateInverseCDFs()
@@ -100,30 +124,27 @@ class ConformationGenerator():
         else:
             cdfs = distribution
 
-        initial_state = self.context.getState(getPositions=True)
-        new_states = []
-
+        # generate new angles
         new_angles = _np.zeros((n_conformers, len(cdfs)))
         for i, (_, cdf) in enumerate(cdfs.values()):
-            if sampling == 'semi-deterministic':
+            if sampling == 'systematic':
                 offset =_np.random.uniform(0, 1 / n_conformers)
                 x_values = _np.linspace(0, 1, num=n_conformers, endpoint=False)
                 y_values = cdf(offset + x_values)
                 _np.random.shuffle(y_values)
                 new_angles[:, i] = y_values
-            elif sampling == 'stochastic':
+            elif sampling == 'multinomial':
                 new_angles[:, i] = cdf(_np.random.uniform(size=n_conformers))
 
-        for n in range(n_conformers):
-            new_angle = new_angles[n, :]
+        # we need to subtract the initial angles to obtain the differences only if the distribution is not uniform
+        if distribution != "uniform":
             current_angle = [self.measureDihedral(self.context.getState(getPositions=True), d) for d, _ in cdfs.values()]
-            delta_phis = new_angle - _np.array(current_angle)
-            # we call the function only once so that the coordinates are not copied for every dihedral rotation
-            self.rotateDihedrals(cdfs.keys(), delta_phis)
-            new_states += [self.context.getState(getPositions=True)]
+            new_angles -= current_angle
 
-        self.context.setState(initial_state)
-        return new_states
+        return list(cdfs.keys()), new_angles
+
+    def generateAndApplyTransformations(self, *args, **kwargs):
+        return self.applyTransformations(*self.generateTransformations(*args, **kwargs))
 
     @staticmethod
     def measureDihedral(state, dihedral_indices):
@@ -143,21 +164,3 @@ class ConformationGenerator():
         y = _np.dot(_np.cross(n1, b2), n2)
         angle = _np.arctan2(y, x)
         return angle
-
-    def rotateDihedrals(self, rotatable_bonds, delta_phis):
-        positions = self.context.getState(getPositions=True).getPositions(asNumpy=True)
-        new_positions = positions.copy()
-
-        for rotatable_bond, delta_phi in zip(rotatable_bonds, delta_phis):
-            # we always rotate the atoms attached to rotatable_bond[1]
-            bond_vector = (positions[rotatable_bond[0], :] - positions[rotatable_bond[1], :]).value_in_unit(_unit.nanometers)
-            bond_vector /= _np.linalg.norm(bond_vector)
-            rotation = _Rotation.from_rotvec(bond_vector * delta_phi)
-            origin = positions[rotatable_bond[1], :]
-            rotatable_atoms = self._rotatable_atoms[rotatable_bond]
-
-            for i in rotatable_atoms:
-                shifted_position = positions[i, :] - origin
-                new_positions[i, :] = rotation.apply(shifted_position) * positions.unit + origin
-
-        self.context.setPositions(new_positions)

@@ -2,7 +2,9 @@ import copy as _copy
 import inspect as _inspect
 import logging as _logging
 import os as _os
+import random as _random
 
+import mdtraj as _mdtraj
 import mdtraj.reporters as _reporters
 import numpy as _np
 import openmmtools as _openmmtools
@@ -23,12 +25,14 @@ class SequentialEnsemble:
     _read_only_properties = ["alchemical_atoms", "current_states", "lambda_", "ligand", "ligname", "structure",
                              "rotatable_bonds"]
 
-    def __init__(self, structure, integrator, platform, ligname="LIG", rotatable_bonds=None, npt=True, md_config=None,
-                 alch_config=None):
+    def __init__(self, coordinates, structure, integrator, platform, ligname="LIG", rotatable_bonds=None, npt=True,
+                 md_config=None, alch_config=None):
         if not md_config:
             md_config = {}
         if not alch_config:
             alch_config = {}
+
+        self.coordinates = coordinates
         self._setStructure(structure, ligname=ligname)
         self.system = SequentialEnsemble.generateSystem(self._structure, **md_config)
         self.generateAlchemicalRegion(rotatable_bonds)
@@ -48,9 +52,10 @@ class SequentialEnsemble:
                                                             _integrators.AlchemicalEnergyEvaluator(), platform=platform)
 
         self._lambda_ = 0
-        self._lambda_history = [0]
-        self._deltaE_history = []
-        self._weight_history = []
+        self.lambda_history = [0]
+        self.deltaE_history = []
+        self.weight_history = []
+        self.reporter_history = []
         self.current_states = []
 
         self.logZ = 0
@@ -114,7 +119,7 @@ class SequentialEnsemble:
 
     def runSingleIteration(self,
                            distribution="uniform",
-                           sampling="semi-deterministic",
+                           sampling="systematic",
                            sampling_metric=_sammetrics.EnergyCorrelation,
                            resampling_method=_resmethods.SystematicResampler,
                            resampling_metric=_resmetrics.WorstCaseSampleSize,
@@ -130,7 +135,13 @@ class SequentialEnsemble:
                            reporter_filename=None,
                            n_walkers=1000,
                            n_conformers_per_walker=100,
-                           output_equilibration=True):
+                           output_equilibration=True,
+                           dynamically_generate_conformers=True,
+                           keep_walkers_in_memory=False):
+        if not keep_walkers_in_memory and reporter_filename is None:
+            raise ValueError("Need to set a reporter if trajectory is not kept in memory.")
+        if not keep_walkers_in_memory and not dynamically_generate_conformers:
+            raise ValueError("Cannot store extra conformers in memory if the walkers are not kept in memory.")
         if _inspect.isclass(sampling_metric):
             sampling_metric = sampling_metric(self)
         default_decorrelation_steps = max(1, default_decorrelation_steps)
@@ -146,51 +157,77 @@ class SequentialEnsemble:
             self.current_states = [self.simulation.context.getState(getPositions=True, getEnergy=True)] * n_walkers
             self.simulation.reporters = []
 
-
         # adaptively set decorrelation time, if needed
         if self._lambda_ and sampling_metric:
             sampling_metric.evaluateBefore()
         elapsed_steps = 0
         while True:
-            extra_conformations = []
+            extra_conformers = []
+
+            # set up reporter, if applicable
             if reporter_filename:
-                current_reporter_filename = reporter_filename.format(round(self._lambda_, 3))
-                if _os.path.exists(current_reporter_filename):
-                    _os.remove(current_reporter_filename)
+                curr_reporter_filename = reporter_filename.format(round(self._lambda_, 8))
+                if _os.path.exists(curr_reporter_filename):
+                    if elapsed_steps:
+                        prev_reporter_filebase, ext = _os.path.splitext(curr_reporter_filename)
+                        prev_reporter_filename = prev_reporter_filebase + "_prev" + ext
+                        _os.rename(curr_reporter_filename, prev_reporter_filename)
+                        self.reporter_history = [x for x in self.reporter_history if x != prev_reporter_filename]
+                        self.reporter_history[-1] = prev_reporter_filename
+                    else:
+                        _os.remove(curr_reporter_filename)
                     self.simulation.reporters = []
-                self.simulation.reporters.append(_reporters.DCDReporter(current_reporter_filename,
+                self.simulation.reporters.append(_reporters.DCDReporter(curr_reporter_filename,
                                                                         default_decorrelation_steps))
 
             # sample
             for n, state in enumerate(self.current_states):
-                self.simulation.context.setState(state)
+                prev_reporter_filename = None if not len(self.reporter_history) else self.reporter_history[-1]
+                if type(state) is tuple:
+                    state, transform = state
+                    transform = [transform]
+                else:
+                    transform = None
+                self.setState(state, self.simulation.context, reporter_filename=prev_reporter_filename, transform=transform)
                 self.simulation.context.setVelocitiesToTemperature(self.temperature)
                 self.simulation.step(default_decorrelation_steps)
-                self.current_states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
+
+                # generate conformers if needed
                 if not self._lambda_:
-                    # TODO: restructure ConformationGenerator to make it cleaner and move it out of the loop
                     target_metric_value = target_metric_value_initial
-                    confgen = _ConformationGenerator(self.system, self._structure, self.simulation.context,
-                                                     self._rotatable_bonds)
-                    extra_conformations += confgen.generateConformers(n_conformers_per_walker,
-                                                                      distribution=distribution,
-                                                                      sampling=sampling)
-                else:
+                    self.confgen = _ConformationGenerator(self.system, self._structure, self.simulation.context,
+                                                          self._rotatable_bonds)
+                    if dynamically_generate_conformers:
+                        extra_conformers += [self.confgen.generateTransformations(n_conformers_per_walker,
+                                                                                  distribution=distribution,
+                                                                                  sampling=sampling)[-1]]
+                    else:
+                        extra_conformers += self.confgen.generateAndApplyTransformations(n_conformers_per_walker,
+                                                                                         distribution=distribution,
+                                                                                         sampling=sampling)
+
+                # update states
+                if keep_walkers_in_memory:
                     self.current_states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
+                else:
+                    self.current_states[n] = n
             elapsed_steps += default_decorrelation_steps
 
             if not self._lambda_:
-                self.current_states = extra_conformations
+                if dynamically_generate_conformers:
+                    extra_conformers = _np.concatenate(extra_conformers)
 
             # reset the reporters
-            self.simulation.reporters = []
+            if reporter_filename:
+                self.simulation.reporters = []
+                self.reporter_history += [curr_reporter_filename]
 
             # return if this is a final decorrelation step
             if self._lambda_ == 1:
                 return
 
             # here we evaluate the baseline reduced energies
-            self._current_reduced_potentials = self.calculateStateEnergies(self.lambda_)
+            self._current_reduced_potentials = self.calculateStateEnergies(self.lambda_, extra_conformers=extra_conformers)
 
             self._current_deltaEs = {}
             self._current_weights = {}
@@ -198,29 +235,30 @@ class SequentialEnsemble:
             # this is the function we are going to minimise
             def evaluateWeights(lambda_):
                 new_lambda = float(min(1., lambda_))
-                self._new_reduced_potentials = self.calculateStateEnergies(new_lambda)
+                self._new_reduced_potentials = self.calculateStateEnergies(new_lambda, extra_conformers=extra_conformers)
                 self._current_deltaEs[new_lambda] = self._new_reduced_potentials - self._current_reduced_potentials
                 self._current_weights[new_lambda] = _np.exp(_np.nanmin(self._current_deltaEs[new_lambda]) - self._current_deltaEs[new_lambda])
                 self._current_weights[new_lambda][self._current_weights[new_lambda] != self._current_weights[new_lambda]] = 0
                 self._current_weights[new_lambda] /= sum(self._current_weights[new_lambda])
-                return resampling_metric.evaluate(self._current_weights[new_lambda])
+                if resampling_metric is not None:
+                    return resampling_metric.evaluate(self._current_weights[new_lambda])
 
             # evaluate next lambda value
-            if resampling_method:
+            if resampling_metric:
                 if target_metric_value is None:
                     target_metric_value = resampling_metric.defaultValue(n_walkers)
                 if target_metric_tol is None:
                     target_metric_tol = resampling_metric.defaultTol(n_walkers)
 
                 # minimise and set optimal lambda value adaptively if possible
-                pivot_y = resampling_metric.evaluate([1 / len(self.current_states)] * len(self.current_states))
+                length = max(len(self.current_states), len(extra_conformers))
+                pivot_y = resampling_metric.evaluate([1 / length] * length)
                 self.next_lambda_ = _GreedyBisectingMinimiser.minimise(evaluateWeights, target_metric_value,
                                                                        self._lambda_, 1., pivot_y=pivot_y,
                                                                        minimum_x=minimum_dlambda, tol=target_metric_tol,
                                                                        maxfun=maximum_metric_evaluations)
             else:
                 # else use default_dlambda
-                target_metric_value = 0
                 self.next_lambda_ = min(1., self._lambda_ + default_dlambda)
                 evaluateWeights(self.next_lambda_)
 
@@ -228,23 +266,34 @@ class SequentialEnsemble:
             if self._lambda_ and sampling_metric:
                 sampling_metric.evaluateAfter()
                 if not sampling_metric.terminateSampling and elapsed_steps < maximum_decorrelation_steps:
-                    sampling_metric.reset()
                     continue
+                sampling_metric.reset()
+
+            if reporter_filename and elapsed_steps != default_decorrelation_steps:
+                _os.remove(self.reporter_history[-2])
             break
 
         # update histories, lambdas, and partition functions
         self._lambda_ = self.next_lambda_
-        self._lambda_history += [self._lambda_]
+        self.lambda_history += [self._lambda_]
         self.simulation.integrator.setGlobalVariableByName("lambda", self._lambda_)
         self._current_deltaEs = self._current_deltaEs[self._lambda_]
         self._current_weights = self._current_weights[self._lambda_]
-        self._deltaE_history += [self._current_deltaEs]
-        self._weight_history += [self._current_weights]
+        self.deltaE_history += [self._current_deltaEs]
+        self.weight_history += [self._current_weights]
         current_deltaEs = self._current_deltaEs[self._current_deltaEs == self._current_deltaEs]
         self.logZ += _logsumexp(-current_deltaEs) - _np.log(current_deltaEs.shape[0])
 
         # sample new states based on weights
-        self.current_states = resampling_method.resample(self.current_states, self._current_weights, n_walkers=n_walkers)[0]
+        if extra_conformers is not None and len(extra_conformers):
+            if dynamically_generate_conformers:
+                new_states = resampling_method.resample([i for i in range(len(extra_conformers))], self._current_weights, n_walkers=n_walkers)[0]
+                self.current_states = [(self.current_states[i // n_conformers_per_walker], extra_conformers[i]) for i in new_states]
+            else:
+                self.current_states = resampling_method.resample(extra_conformers, self._current_weights, n_walkers=n_walkers)[0]
+        else:
+            self.current_states = resampling_method.resample(self.current_states, self._current_weights, n_walkers=n_walkers)[0]
+        _random.shuffle(self.current_states)
 
     @property
     def kT(self):
@@ -267,15 +316,59 @@ class SequentialEnsemble:
         except:
             return None
 
-    def calculateStateEnergies(self, lambda_, states=None):
+    def calculateStateEnergies(self, lambda_, states=None, extra_conformers=None, *args, **kwargs):
         if states is None:
             states = self.current_states
-        # evaluate energies at each state at the given lambda
+
         energies = []
-        for state in states:
-            self._dummy_simulation.context.setState(state)
-            energies += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(lambda_) / self.kT]
+        conf_iterations = 0 if extra_conformers is None else len(extra_conformers) // len(states)
+        if "reporter_filename" not in kwargs.keys():
+            kwargs["reporter_filename"] = None if not len(self.reporter_history) else self.reporter_history[-1]
+
+        for i, state in enumerate(states):
+            # this is the for the case of lambda = 0
+            if conf_iterations:
+                # here we optimise by only loading the state once from the hard drive, if applicable
+                if type(state) is int:
+                    self.setState(state, self._dummy_simulation.context, *args, **kwargs)
+                    state = self._dummy_simulation.context.getState(getPositions=True)
+                # here we generate the conformers dynamically, if applicable
+                for j in range(conf_iterations):
+                    # we generate dynamically
+                    if type(extra_conformers[conf_iterations * i + j]) is _np.ndarray:
+                        self.setState(state, self._dummy_simulation.context,
+                                      transform=extra_conformers[conf_iterations * i + j], *args, **kwargs)
+                    # or we don't
+                    else:
+                        self.setState(extra_conformers[conf_iterations * i + j], self._dummy_simulation.context,
+                                      *args, **kwargs)
+                    energies += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(lambda_) / self.kT]
+            # this is for all other cases
+            else:
+                # we load from the hard drive
+                if type(state) is tuple:
+                    state, transform = state
+                    transform = [transform]
+                # or we don't
+                else:
+                    transform = None
+                kwargs["transform"] = transform
+                self.setState(state, self._dummy_simulation.context, *args, **kwargs)
+                energies += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(lambda_) / self.kT]
+
         return _np.asarray(energies, dtype=_np.float32)
+
+    def setState(self, state, context, reporter_filename=None, transform=None):
+        if type(state) is int:
+            frame = _mdtraj.load_frame(reporter_filename, state, self.coordinates)
+            positions = frame.xyz[0]
+            periodic_box_vectors = frame.unitcell_vectors[0]
+            context.setPositions(positions)
+            context.setPeriodicBoxVectors(*periodic_box_vectors)
+        else:
+            context.setState(state)
+        if transform is not None:
+            self.confgen.applyTransformations(self._rotatable_bonds, [transform], context=context)
 
     def _setStructure(self, struct, ligname="LIG"):
         self._structure = struct
