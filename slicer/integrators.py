@@ -3,7 +3,7 @@ import simtk.unit as _unit
 
 
 def make_alchemical(cls):
-    def __init__(self, *args, alchemical_functions=None, initial_lambda=0, **kwargs):
+    def __init__(self, alchemical_functions=None, initial_lambda=0, *args, **kwargs):
         if not alchemical_functions:
             alchemical_functions = {
                 'lambda_sterics': 'min(lambda, 1)',
