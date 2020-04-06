@@ -282,7 +282,7 @@ class SequentialEnsemble:
         self.deltaE_history += [self._current_deltaEs]
         self.weight_history += [self._current_weights]
         current_deltaEs = self._current_deltaEs[self._current_deltaEs == self._current_deltaEs]
-        self.logZ += _logsumexp(-current_deltaEs) - _np.log(current_deltaEs.shape[0])
+        self.logZ += _logsumexp(-current_deltaEs) - _np.log(self._current_deltaEs.shape[0])
 
         # sample new states based on weights
         if extra_conformers is not None and len(extra_conformers):
