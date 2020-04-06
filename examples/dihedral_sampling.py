@@ -25,9 +25,9 @@ md_config = {
 }
 
 # set up integrator, platform, system and minimise
-integrator = AlchemicalLangevinIntegrator(298, 1, 0.002)
+integrator = AlchemicalLangevinIntegrator(temperature=298.*unit.kelvin, collision_rate=1./unit.picoseconds, timestep=2.*unit.femtoseconds)
 platform = "CUDA"
-ensemble = SequentialSampler(structure, integrator, platform, rotatable_bonds=rotatable_bonds, ligname='LIG', md_config=md_config)
+ensemble = SequentialSampler(gro, structure, integrator, platform, rotatable_bonds=rotatable_bonds, ligname='LIG', md_config=md_config)
 ensemble.simulation.minimizeEnergy()
 
 # run simulation
