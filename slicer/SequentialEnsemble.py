@@ -20,6 +20,8 @@ import slicer.resampling_metrics as _resmetrics
 import slicer.resampling_methods as _resmethods
 import slicer.sampling_metrics as _sammetrics
 
+_logger = _logging.getLogger(__name__)
+
 
 class SequentialEnsemble:
     _read_only_properties = ["alchemical_atoms", "current_states", "lambda_", "ligand", "ligname", "structure",
@@ -187,12 +189,15 @@ class SequentialEnsemble:
                     transform = [transform]
                 else:
                     transform = None
-                self.setState(state, self.simulation.context, reporter_filename=prev_reporter_filename, transform=transform)
+                self.setState(state, self.simulation.context, reporter_filename=prev_reporter_filename,
+                              transform=transform)
                 self.simulation.context.setVelocitiesToTemperature(self.temperature)
                 self.simulation.step(default_decorrelation_steps)
 
                 # generate conformers if needed
                 if not self._lambda_:
+                    if not n:
+                        _logger.info("Generating {} total conformers...".format(n_walkers * n_conformers_per_walker))
                     target_metric_value = target_metric_value_initial
                     self.confgen = _ConformationGenerator(self.system, self._structure, self.simulation.context,
                                                           self._rotatable_bonds)
@@ -223,6 +228,7 @@ class SequentialEnsemble:
 
             # return if this is a final decorrelation step
             if self._lambda_ == 1:
+                _logger.info("Sampling at lambda = 1 terminated after {} steps...".format(elapsed_steps))
                 return
 
             # here we evaluate the baseline reduced energies
@@ -240,7 +246,9 @@ class SequentialEnsemble:
                 self._current_weights[new_lambda][self._current_weights[new_lambda] != self._current_weights[new_lambda]] = 0
                 self._current_weights[new_lambda] /= sum(self._current_weights[new_lambda])
                 if resampling_metric is not None:
-                    return resampling_metric.evaluate(self._current_weights[new_lambda])
+                    val = resampling_metric.evaluate(self._current_weights[new_lambda])
+                    _logger.debug("Resampling metric {:.8g} at new lambda {:.8g}".format(val, new_lambda))
+                    return val
 
             # evaluate next lambda value
             if resampling_metric:
@@ -256,6 +264,7 @@ class SequentialEnsemble:
                                                                        self._lambda_, 1., pivot_y=pivot_y,
                                                                        minimum_x=minimum_dlambda, tol=target_metric_tol,
                                                                        maxfun=maximum_metric_evaluations)
+                _logger.debug("Tentative next lambda: {}".format(self.next_lambda_))
             else:
                 # else use default_dlambda
                 self.next_lambda_ = min(1., self._lambda_ + default_dlambda)
@@ -264,6 +273,8 @@ class SequentialEnsemble:
             # continue decorrelation if metric says so and break otherwise
             if self._lambda_ and sampling_metric:
                 sampling_metric.evaluateAfter()
+                _logger.debug("Sampling metric {:.8g} at new lambda {:.8g}".format(sampling_metric.metric,
+                                                                                   self.next_lambda_))
                 if not sampling_metric.terminateSampling and elapsed_steps < maximum_decorrelation_steps:
                     continue
                 sampling_metric.reset()
@@ -286,13 +297,23 @@ class SequentialEnsemble:
         # sample new states based on weights
         if extra_conformers is not None and len(extra_conformers):
             if dynamically_generate_conformers:
-                new_states = resampling_method.resample([i for i in range(len(extra_conformers))], self._current_weights, n_walkers=n_walkers)[0]
-                self.current_states = [(self.current_states[i // n_conformers_per_walker], extra_conformers[i]) for i in new_states]
+                new_states = resampling_method.resample([i for i in range(len(extra_conformers))],
+                                                        self._current_weights, n_walkers=n_walkers)[0]
+                self.current_states = [(self.current_states[i // n_conformers_per_walker], extra_conformers[i])
+                                       for i in new_states]
             else:
-                self.current_states = resampling_method.resample(extra_conformers, self._current_weights, n_walkers=n_walkers)[0]
+                self.current_states = resampling_method.resample(extra_conformers, self._current_weights,
+                                                                 n_walkers=n_walkers)[0]
         else:
-            self.current_states = resampling_method.resample(self.current_states, self._current_weights, n_walkers=n_walkers)[0]
+            self.current_states = resampling_method.resample(self.current_states, self._current_weights,
+                                                             n_walkers=n_walkers)[0]
         _random.shuffle(self.current_states)
+
+        _logger.info("Sampling at lambda = {:.8g} terminated after {} steps".format(self.lambda_history[-2],
+                                                                                    elapsed_steps))
+        _logger.info("Reporter path: \"{}\"".format(self.reporter_history[-1]))
+        _logger.info("Current accumulated logZ: {:.8g}".format(self.logZ))
+        _logger.info("Next lambda: {:.8g}".format(self._lambda_))
 
     @property
     def kT(self):
@@ -592,7 +613,7 @@ class SequentialEnsemble:
         system : openmm.System
             The OpenMM System with the MonteCarloBarostat attached.
         """
-        #logger.info('Adding MonteCarloBarostat with {}. MD simulation will be {} NPT.'.format(pressure, temperature))
+        _logger.info('Adding MonteCarloBarostat with {}. MD simulation will be {} NPT.'.format(pressure, temperature))
         # Add Force Barostat to the system
         system.addForce(_openmm.MonteCarloBarostat(pressure, temperature, frequency))
         return system

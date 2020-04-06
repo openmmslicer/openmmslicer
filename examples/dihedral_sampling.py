@@ -2,6 +2,9 @@ from slicer.integrators import AlchemicalLangevinIntegrator
 from slicer.resampling_metrics import WorstCaseSampleSize
 from slicer.SequentialEnsemble import SequentialEnsemble
 
+import logging
+logging.basicConfig(level=logging.INFO)
+
 import parmed as pmd
 import simtk.unit as unit
 import simtk.openmm.app as app
