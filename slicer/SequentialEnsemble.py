@@ -40,8 +40,7 @@ class SequentialEnsemble:
             alch_config["alchemical_torsions"] = self._alchemical_dihedral_indices
         self.alch_system = SequentialEnsemble.generateAlchSystem(self.system, self._alchemical_atoms, **alch_config)
         if npt:
-            # TODO: this doesn't work correctly for temperatures != 298 K
-            self.alch_system = self.addBarostat(self.alch_system)
+            self.alch_system = self.addBarostat(self.alch_system, temperature=integrator.getTemperature())
 
         # TODO: implement parallelism?
         self.platform = platform
