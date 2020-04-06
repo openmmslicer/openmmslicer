@@ -31,8 +31,7 @@ ensemble = SequentialSampler(gro, structure, integrator, platform, rotatable_bon
 ensemble.simulation.minimizeEnergy()
 
 # run simulation
-ensemble.run(equilibration_steps=100000,
-             n_walkers=1000,
+ensemble.run(n_walkers=1000,
              n_conformers_per_walker=25,
              resampling_metric=WorstCaseSampleSize,
              target_metric_value=100,

@@ -132,11 +132,10 @@ class SequentialSampler:
                            minimum_dlambda=0.01,
                            default_decorrelation_steps=500,
                            maximum_decorrelation_steps=5000,
-                           equilibration_steps=100000,
                            reporter_filename=None,
                            n_walkers=1000,
                            n_conformers_per_walker=100,
-                           output_equilibration=True,
+                           equilibration_options=None,
                            dynamically_generate_conformers=True,
                            keep_walkers_in_memory=False):
         if not keep_walkers_in_memory and reporter_filename is None:
@@ -147,16 +146,14 @@ class SequentialSampler:
             sampling_metric = sampling_metric(self)
         default_decorrelation_steps = max(1, default_decorrelation_steps)
 
-        # run either initial conformer generation or MD decorrelation
+        # equilibrate if lambda = 0
         if not self._lambda_:
-            equilibration_steps = max(1, equilibration_steps)
-            if reporter_filename and output_equilibration:
-                self.simulation.reporters.append(_reporters.DCDReporter(reporter_filename.format("equil"),
-                                                                        default_decorrelation_steps))
-            self.simulation.context.setVelocitiesToTemperature(self.temperature)
-            self.simulation.step(equilibration_steps)
+            if equilibration_options is None:
+                equilibration_options = {}
+            if reporter_filename is not None and "reporter_filename" not in equilibration_options:
+                equilibration_options["reporter_filename"] = reporter_filename.format("equil")
+            self.equilibrate(**equilibration_options)
             self.current_states = [self.simulation.context.getState(getPositions=True, getEnergy=True)] * n_walkers
-            self.simulation.reporters = []
 
         # adaptively set decorrelation time, if needed
         if self._lambda_ and sampling_metric:
@@ -273,7 +270,7 @@ class SequentialSampler:
             # continue decorrelation if metric says so and break otherwise
             if self._lambda_ and sampling_metric:
                 sampling_metric.evaluateAfter()
-                _logger.debug("Sampling metric {:.8g} at new lambda {:.8g}".format(sampling_metric.metric,
+                _logger.debug("Sampling metric {:.8g} at next lambda {:.8g}".format(sampling_metric.metric,
                                                                                    self.next_lambda_))
                 if not sampling_metric.terminateSampling and elapsed_steps < maximum_decorrelation_steps:
                     continue
@@ -408,6 +405,42 @@ class SequentialSampler:
         all_rotatable_dihedrals = {frozenset(x) for x in self._rotatable_bonds}
         self._alchemical_dihedral_indices = [i for i, d in enumerate(self._structure.dihedrals) if not d.improper and
                                              {d.atom2.idx, d.atom3.idx} in all_rotatable_dihedrals]
+
+    def equilibrate(self,
+                    equilibration_steps=100000,
+                    restrain_backbone=True,
+                    force_constant=5.0 * _unit.kilocalories_per_mole / _unit.angstroms ** 2,
+                    output_interval=100000,
+                    reporter_filename=None):
+        if reporter_filename is not None:
+            self.simulation.reporters.append(_reporters.DCDReporter(reporter_filename, output_interval))
+
+        # add restraints, if applicable
+        if restrain_backbone:
+            _logger.info("Adding equilibration restraints...")
+            force = _openmm.CustomExternalForce("k*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
+            force.addGlobalParameter("k", force_constant)
+            force.addPerParticleParameter("x0")
+            force.addPerParticleParameter("y0")
+            force.addPerParticleParameter("z0")
+            for i, atom_crd in enumerate(self._structure.positions):
+                if self._structure.atoms[i].name in ('CA', 'C', 'N'):
+                    force.addParticle(i, atom_crd.value_in_unit(_unit.nanometers))
+            force_idx = self.alch_system.addForce(force)
+
+        # run the equilibration
+        _logger.info("Running initial equilibration...")
+        self.simulation.integrator.setGlobalVariableByName("lambda", 0.)
+        self.simulation.context.setVelocitiesToTemperature(self.temperature)
+        self.simulation.step(equilibration_steps)
+
+        # remove the restraints, if applicable
+        if restrain_backbone:
+            _logger.info("Removing equilibration restraints...")
+            self.alch_system.removeForce(force_idx)
+
+        if reporter_filename is not None:
+            self.simulation.reporters = []
 
     @staticmethod
     def generateSystem(structure, **kwargs):
