@@ -112,11 +112,11 @@ class SequentialSampler:
 
         return simulation
 
-    def run(self, *args, **kwargs):
-        while self._lambda_ <= 1:
+    def run(self, final_decorrelation_step=True, *args, **kwargs):
+        while self._lambda_ < 1:
             self.runSingleIteration(*args, **kwargs)
-            if self._lambda_ == 1:
-                break
+        if final_decorrelation_step:
+            self.runSingleIteration(*args, **kwargs)
 
     def runSingleIteration(self,
                            distribution="uniform",
