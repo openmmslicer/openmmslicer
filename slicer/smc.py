@@ -23,7 +23,7 @@ import slicer.sampling_metrics as _sammetrics
 _logger = _logging.getLogger(__name__)
 
 
-class SequentialEnsemble:
+class SequentialSampler:
     _read_only_properties = ["alchemical_atoms", "current_states", "lambda_", "ligand", "ligname", "structure",
                              "rotatable_bonds"]
 
@@ -36,11 +36,11 @@ class SequentialEnsemble:
 
         self.coordinates = coordinates
         self._setStructure(structure, ligname=ligname)
-        self.system = SequentialEnsemble.generateSystem(self._structure, **md_config)
+        self.system = SequentialSampler.generateSystem(self._structure, **md_config)
         self.generateAlchemicalRegion(rotatable_bonds)
         if not "alchemical_torsions" in alch_config.keys():
             alch_config["alchemical_torsions"] = self._alchemical_dihedral_indices
-        self.alch_system = SequentialEnsemble.generateAlchSystem(self.system, self._alchemical_atoms, **alch_config)
+        self.alch_system = SequentialSampler.generateAlchSystem(self.system, self._alchemical_atoms, **alch_config)
         if npt:
             self.alch_system = self.addBarostat(self.alch_system, temperature=integrator.getTemperature())
 

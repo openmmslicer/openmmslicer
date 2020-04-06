@@ -1,6 +1,6 @@
 from slicer.integrators import AlchemicalLangevinIntegrator
 from slicer.resampling_metrics import WorstCaseSampleSize
-from slicer.SequentialEnsemble import SequentialEnsemble
+from slicer.smc import SequentialSampler
 
 import logging
 logging.basicConfig(level=logging.INFO)
@@ -27,7 +27,7 @@ md_config = {
 # set up integrator, platform, system and minimise
 integrator = AlchemicalLangevinIntegrator(298, 1, 0.002)
 platform = "CUDA"
-ensemble = SequentialEnsemble(structure, integrator, platform, rotatable_bonds=rotatable_bonds, ligname='LIG', md_config=md_config)
+ensemble = SequentialSampler(structure, integrator, platform, rotatable_bonds=rotatable_bonds, ligname='LIG', md_config=md_config)
 ensemble.simulation.minimizeEnergy()
 
 # run simulation
