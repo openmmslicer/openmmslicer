@@ -53,6 +53,7 @@ class SequentialSampler:
                                                             _integrators.AlchemicalEnergyEvaluator(), platform=platform)
 
         self._lambda_ = 0
+        self.total_sampling_steps = 0
         self.lambda_history = [0]
         self.deltaE_history = []
         self.weight_history = []
@@ -117,6 +118,8 @@ class SequentialSampler:
             self.runSingleIteration(*args, **kwargs)
         if final_decorrelation_step:
             self.runSingleIteration(*args, **kwargs)
+        total_sampling_time_ns = self.total_sampling_steps * self.integrator.getStepSize() / 1000
+        _logger.info("Total simulation time was {} ns".format(total_sampling_time_ns))
 
     def runSingleIteration(self,
                            distribution="uniform",
@@ -213,6 +216,7 @@ class SequentialSampler:
                 else:
                     self.current_states[n] = n
             elapsed_steps += default_decorrelation_steps
+            self.total_sampling_steps += default_decorrelation_steps * n_walkers
 
             if not self._lambda_:
                 if dynamically_generate_conformers:
