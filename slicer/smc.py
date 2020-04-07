@@ -27,11 +27,11 @@ class SequentialSampler:
     _read_only_properties = ["alchemical_atoms", "current_states", "lambda_", "ligand", "ligname", "structure",
                              "rotatable_bonds"]
 
-    def __init__(self, coordinates, structure, integrator, platform, ligname="LIG", rotatable_bonds=None, npt=True,
-                 md_config=None, alch_config=None):
-        if not md_config:
+    def __init__(self, coordinates, structure, integrator, platform=None, platform_properties=None, ligname="LIG",
+                 rotatable_bonds=None, npt=True, md_config=None, alch_config=None):
+        if md_config is None:
             md_config = {}
-        if not alch_config:
+        if alch_config is None:
             alch_config = {}
 
         self.coordinates = coordinates
@@ -46,11 +46,13 @@ class SequentialSampler:
 
         # TODO: implement parallelism?
         self.platform = platform
+        self.platform_properties = platform_properties
         self.integrator = _copy.copy(integrator)
-        self.simulation = self.generateSimFromStruct(structure, self.alch_system, self.integrator, platform=platform)
+        self.simulation = self.generateSimFromStruct(
+            structure, self.alch_system, self.integrator, platform, platform_properties)
         # this is only used for energy evaluation
-        self._dummy_simulation = self.generateSimFromStruct(structure, self.alch_system,
-                                                            _integrators.AlchemicalEnergyEvaluator(), platform=platform)
+        self._dummy_simulation = self.generateSimFromStruct(
+            structure, self.alch_system, _integrators.AlchemicalEnergyEvaluator(), platform, platform_properties)
 
         self._lambda_ = 0
         self.total_sampling_steps = 0
