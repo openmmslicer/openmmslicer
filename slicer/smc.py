@@ -124,8 +124,8 @@ class SequentialSampler:
         _logger.info("Total simulation time was {} ns".format(total_sampling_time_ns))
 
     def runSingleIteration(self,
-                           distribution="uniform",
-                           sampling="systematic",
+                           conformer_distribution="uniform",
+                           conformer_sampling="systematic",
                            sampling_metric=_sammetrics.EnergyCorrelation,
                            resampling_method=_resmethods.SystematicResampler,
                            resampling_metric=_resmetrics.WorstCaseSampleSize,
@@ -204,13 +204,11 @@ class SequentialSampler:
                     self.confgen = _ConformationGenerator(self.system, self._structure, self.simulation.context,
                                                           self._rotatable_bonds)
                     if dynamically_generate_conformers:
-                        extra_conformers += [self.confgen.generateTransformations(n_conformers_per_walker,
-                                                                                  distribution=distribution,
-                                                                                  sampling=sampling)[-1]]
+                        extra_conformers += [self.confgen.generateTransformations(
+                            n_conformers_per_walker, conformer_distribution, conformer_sampling)[-1]]
                     else:
-                        extra_conformers += self.confgen.generateAndApplyTransformations(n_conformers_per_walker,
-                                                                                         distribution=distribution,
-                                                                                         sampling=sampling)
+                        extra_conformers += self.confgen.generateAndApplyTransformations(
+                            n_conformers_per_walker, conformer_distribution, conformer_sampling)
 
                 # update states
                 if keep_walkers_in_memory:
