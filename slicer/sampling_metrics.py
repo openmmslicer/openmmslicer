@@ -14,6 +14,10 @@ class EnergyCorrelation:
         self.E_after = self.ensemble.calculateStateEnergies(self.ensemble.lambda_)
 
     @property
+    def requireNextLambda(self):
+        return False
+
+    @property
     def min(self):
         return -0.1
 

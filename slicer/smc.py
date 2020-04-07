@@ -228,6 +228,14 @@ class SequentialSampler:
                 _logger.info("Sampling at lambda = 1 terminated after {} steps...".format(elapsed_steps))
                 return
 
+            # continue decorrelation if metric says so and break otherwise
+            # only for metrics that don't need the next lambda value
+            if self._lambda_ and sampling_metric and not sampling_metric.requireNextLambda:
+                sampling_metric.evaluateAfter()
+                _logger.debug("Sampling metric {:.8g}".format(sampling_metric.metric))
+                if not sampling_metric.terminateSampling and elapsed_steps < maximum_decorrelation_steps:
+                    continue
+
             # here we evaluate the baseline reduced energies
             self._current_reduced_potentials = self.calculateStateEnergies(self.lambda_, extra_conformers=extra_conformers)
 
@@ -244,7 +252,7 @@ class SequentialSampler:
                 self._current_weights[new_lambda] /= sum(self._current_weights[new_lambda])
                 if resampling_metric is not None:
                     val = resampling_metric.evaluate(self._current_weights[new_lambda])
-                    _logger.debug("Resampling metric {:.8g} at new lambda {:.8g}".format(val, new_lambda))
+                    _logger.debug("Resampling metric {:.8g} at next lambda {:.8g}".format(val, new_lambda))
                     return val
 
             # evaluate next lambda value
@@ -268,12 +276,14 @@ class SequentialSampler:
                 evaluateWeights(self.next_lambda_)
 
             # continue decorrelation if metric says so and break otherwise
+            # only for metrics that need the next lambda value
             if self._lambda_ and sampling_metric:
-                sampling_metric.evaluateAfter()
-                _logger.debug("Sampling metric {:.8g} at next lambda {:.8g}".format(sampling_metric.metric,
-                                                                                   self.next_lambda_))
-                if not sampling_metric.terminateSampling and elapsed_steps < maximum_decorrelation_steps:
-                    continue
+                if sampling_metric.requireNextLambda:
+                    sampling_metric.evaluateAfter()
+                    _logger.debug("Sampling metric {:.8g} at next lambda {:.8g}".format(sampling_metric.metric,
+                                                                                       self.next_lambda_))
+                    if not sampling_metric.terminateSampling and elapsed_steps < maximum_decorrelation_steps:
+                        continue
                 sampling_metric.reset()
 
             if reporter_filename and elapsed_steps != default_decorrelation_steps:
