@@ -13,9 +13,9 @@ import simtk.openmm as _openmm
 import simtk.unit as _unit
 import simtk.openmm.app as _app
 
-from slicer.conformations import ConformationGenerator as _ConformationGenerator
 import slicer.integrators as _integrators
 from slicer.minimise import GreedyBisectingMinimiser as _GreedyBisectingMinimiser
+import slicer.moves as _moves
 import slicer.resampling_metrics as _resmetrics
 import slicer.resampling_methods as _resmethods
 import slicer.sampling_metrics as _sammetrics
@@ -24,23 +24,21 @@ _logger = _logging.getLogger(__name__)
 
 
 class SequentialSampler:
-    _read_only_properties = ["alchemical_atoms", "current_states", "lambda_", "ligand", "ligname", "structure",
-                             "rotatable_bonds"]
-
-    def __init__(self, coordinates, structure, integrator, platform=None, platform_properties=None, ligname="LIG",
-                 rotatable_bonds=None, npt=True, md_config=None, alch_config=None):
+    def __init__(self, coordinates, structure, integrator, moves, platform=None, platform_properties=None,
+                 npt=True, md_config=None, alch_config=None):
         if md_config is None:
             md_config = {}
         if alch_config is None:
             alch_config = {}
 
         self.coordinates = coordinates
-        self._setStructure(structure, ligname=ligname)
-        self.system = SequentialSampler.generateSystem(self._structure, **md_config)
-        self.generateAlchemicalRegion(rotatable_bonds)
-        if not "alchemical_torsions" in alch_config.keys():
+        self.moves = moves
+        self.structure = structure
+        self.system = SequentialSampler.generateSystem(self.structure, **md_config)
+        self.generateAlchemicalRegion()
+        if "alchemical_torsions" not in alch_config.keys():
             alch_config["alchemical_torsions"] = self._alchemical_dihedral_indices
-        self.alch_system = SequentialSampler.generateAlchSystem(self.system, self._alchemical_atoms, **alch_config)
+        self.alch_system = SequentialSampler.generateAlchSystem(self.system, self.alchemical_atoms, **alch_config)
         if npt:
             self.alch_system = self.addBarostat(self.alch_system, temperature=integrator.getTemperature())
 
@@ -54,7 +52,7 @@ class SequentialSampler:
         self._dummy_simulation = self.generateSimFromStruct(
             structure, self.alch_system, _integrators.AlchemicalEnergyEvaluator(), platform, platform_properties)
 
-        self._lambda_ = 0
+        self.lambda_ = 0
         self.total_sampling_steps = 0
         self.lambda_history = [0]
         self.deltaE_history = []
@@ -63,15 +61,6 @@ class SequentialSampler:
         self.current_states = []
 
         self.logZ = 0
-
-    def __getattr__(self, item):
-        if item not in self._read_only_properties:
-            return self.__getattribute__(item)
-        else:
-            try:
-                return self.__getattribute__("_" + item)
-            except AttributeError:
-                return None
 
     @classmethod
     def generateSimFromStruct(cls, structure, system, integrator, platform=None, properties=None, **kwargs):
@@ -116,7 +105,7 @@ class SequentialSampler:
         return simulation
 
     def run(self, final_decorrelation_step=True, *args, **kwargs):
-        while self._lambda_ < 1:
+        while self.lambda_ < 1:
             self.runSingleIteration(*args, **kwargs)
         if final_decorrelation_step:
             self.runSingleIteration(*args, **kwargs)
@@ -124,8 +113,6 @@ class SequentialSampler:
         _logger.info("Total simulation time was {}".format(total_sampling_time))
 
     def runSingleIteration(self,
-                           conformer_distribution="uniform",
-                           conformer_sampling="systematic",
                            sampling_metric=_sammetrics.EnergyCorrelation,
                            resampling_method=_resmethods.SystematicResampler,
                            resampling_metric=_resmetrics.WorstCaseSampleSize,
@@ -152,7 +139,7 @@ class SequentialSampler:
         default_decorrelation_steps = max(1, default_decorrelation_steps)
 
         # equilibrate if lambda = 0
-        if not self._lambda_:
+        if not self.lambda_:
             if equilibration_options is None:
                 equilibration_options = {}
             if reporter_filename is not None and "reporter_filename" not in equilibration_options:
@@ -161,7 +148,7 @@ class SequentialSampler:
             self.current_states = [self.simulation.context.getState(getPositions=True, getEnergy=True)] * n_walkers
 
         # adaptively set decorrelation time, if needed
-        if self._lambda_ and sampling_metric:
+        if self.lambda_ and sampling_metric:
             sampling_metric.evaluateBefore()
         elapsed_steps = 0
         while True:
@@ -169,7 +156,7 @@ class SequentialSampler:
 
             # set up reporter, if applicable
             if reporter_filename:
-                curr_reporter_filename = reporter_filename.format(round(self._lambda_, 8))
+                curr_reporter_filename = reporter_filename.format(round(self.lambda_, 8))
                 if _os.path.exists(curr_reporter_filename):
                     if elapsed_steps:
                         prev_reporter_filebase, ext = _os.path.splitext(curr_reporter_filename)
@@ -188,7 +175,6 @@ class SequentialSampler:
                 prev_reporter_filename = None if not len(self.reporter_history) else self.reporter_history[-1]
                 if type(state) is tuple:
                     state, transform = state
-                    transform = [transform]
                 else:
                     transform = None
                 self.setState(state, self.simulation.context, reporter_filename=prev_reporter_filename,
@@ -197,18 +183,18 @@ class SequentialSampler:
                 self.simulation.step(default_decorrelation_steps)
 
                 # generate conformers if needed
-                if not self._lambda_:
+                if not self.lambda_:
                     if not n:
                         _logger.info("Generating {} total conformers...".format(n_walkers * n_conformers_per_walker))
                     target_metric_value = target_metric_value_initial
-                    self.confgen = _ConformationGenerator(self.system, self._structure, self.simulation.context,
-                                                          self._rotatable_bonds)
+                    transforms = self.moves.generateMoves(n_conformers_per_walker)
                     if dynamically_generate_conformers:
-                        extra_conformers += [self.confgen.generateTransformations(
-                            n_conformers_per_walker, conformer_distribution, conformer_sampling)[-1]]
+                        extra_conformers += [transforms]
                     else:
-                        extra_conformers += self.confgen.generateAndApplyTransformations(
-                            n_conformers_per_walker, conformer_distribution, conformer_sampling)
+                        for t in transforms:
+                            self.moves.applyMove(self.simulation.context, t)
+                            extra_conformers += [self.simulation.context.getState(getPositions=True)]
+                            self.simulation.context.setState(state)
 
                 # update states
                 if keep_walkers_in_memory:
@@ -218,7 +204,7 @@ class SequentialSampler:
             elapsed_steps += default_decorrelation_steps
             self.total_sampling_steps += default_decorrelation_steps * n_walkers
 
-            if not self._lambda_:
+            if not self.lambda_:
                 if dynamically_generate_conformers:
                     extra_conformers = _np.concatenate(extra_conformers)
 
@@ -228,13 +214,13 @@ class SequentialSampler:
                 self.reporter_history += [curr_reporter_filename]
 
             # return if this is a final decorrelation step
-            if self._lambda_ == 1:
-                _logger.info("Sampling at lambda = 1 terminated after {} steps...".format(elapsed_steps))
+            if self.lambda_ == 1:
+                _logger.info("Sampling at lambda = 1 terminated after {} steps".format(elapsed_steps))
                 return
 
             # continue decorrelation if metric says so and break otherwise
             # only for metrics that don't need the next lambda value
-            if self._lambda_ and sampling_metric and not sampling_metric.requireNextLambda:
+            if self.lambda_ and sampling_metric and not sampling_metric.requireNextLambda:
                 sampling_metric.evaluateAfter()
                 _logger.debug("Sampling metric {:.8g}".format(sampling_metric.metric))
                 if not sampling_metric.terminateSampling and elapsed_steps < maximum_decorrelation_steps:
@@ -270,18 +256,18 @@ class SequentialSampler:
                 length = max(len(self.current_states), len(extra_conformers))
                 pivot_y = resampling_metric.evaluate([1 / length] * length)
                 self.next_lambda_ = _GreedyBisectingMinimiser.minimise(evaluateWeights, target_metric_value,
-                                                                       self._lambda_, 1., pivot_y=pivot_y,
+                                                                       self.lambda_, 1., pivot_y=pivot_y,
                                                                        minimum_x=minimum_dlambda, tol=target_metric_tol,
                                                                        maxfun=maximum_metric_evaluations)
                 _logger.debug("Tentative next lambda: {:.8g}".format(self.next_lambda_))
             else:
                 # else use default_dlambda
-                self.next_lambda_ = min(1., self._lambda_ + default_dlambda)
+                self.next_lambda_ = min(1., self.lambda_ + default_dlambda)
                 evaluateWeights(self.next_lambda_)
 
             # continue decorrelation if metric says so and break otherwise
             # only for metrics that need the next lambda value
-            if self._lambda_ and sampling_metric:
+            if self.lambda_ and sampling_metric:
                 if sampling_metric.requireNextLambda:
                     sampling_metric.evaluateAfter()
                     _logger.debug("Sampling metric {:.8g} at next lambda {:.8g}".format(sampling_metric.metric,
@@ -295,11 +281,11 @@ class SequentialSampler:
             break
 
         # update histories, lambdas, and partition functions
-        self._lambda_ = self.next_lambda_
-        self.lambda_history += [self._lambda_]
-        self.simulation.integrator.setGlobalVariableByName("lambda", self._lambda_)
-        self._current_deltaEs = self._current_deltaEs[self._lambda_]
-        self._current_weights = self._current_weights[self._lambda_]
+        self.lambda_ = self.next_lambda_
+        self.lambda_history += [self.lambda_]
+        self.simulation.integrator.setGlobalVariableByName("lambda", self.lambda_)
+        self._current_deltaEs = self._current_deltaEs[self.lambda_]
+        self._current_weights = self._current_weights[self.lambda_]
         self.deltaE_history += [self._current_deltaEs]
         self.weight_history += [self._current_weights]
         current_deltaEs = self._current_deltaEs[self._current_deltaEs == self._current_deltaEs]
@@ -324,7 +310,11 @@ class SequentialSampler:
                                                                                     elapsed_steps))
         _logger.info("Reporter path: \"{}\"".format(self.reporter_history[-1]))
         _logger.info("Current accumulated logZ: {:.8g}".format(self.logZ))
-        _logger.info("Next lambda: {:.8g}".format(self._lambda_))
+        _logger.info("Next lambda: {:.8g}".format(self.lambda_))
+
+    @property
+    def alchemical_atoms(self):
+        return self.moves.alchemical_atoms
 
     @property
     def kT(self):
@@ -334,6 +324,18 @@ class SequentialSampler:
             return kT
         except:
             return None
+
+    @property
+    def moves(self):
+        return self._moves
+
+    @moves.setter
+    def moves(self, val):
+        if not isinstance(val, (list, _moves.MoveList)):
+            val = _moves.MoveList([val])
+        elif isinstance(val, list):
+            val = _moves.MoveList(val)
+        self._moves = val
 
     @property
     def n_walkers(self):
@@ -399,26 +401,13 @@ class SequentialSampler:
         else:
             context.setState(state)
         if transform is not None:
-            self.confgen.applyTransformations(self._rotatable_bonds, [transform], context=context)
+            self.moves.applyMove(context, transform)
 
-    def _setStructure(self, struct, ligname="LIG"):
-        self._structure = struct
-        self._ligname = ligname
-
-        # only get the relevant residue
-        idx_abs = sum(([x.idx for x in res.atoms] for res in self._structure.residues if res.name == self._ligname), [])
-        lig = self.structure[":{}".format(ligname)]
-        idx_rel = sum(([x.idx for x in res.atoms] for res in lig.residues if res.name == self._ligname), [])
-        self._abs_to_rel = {x: y for x, y in zip(idx_abs, idx_rel)}
-        self._rel_to_abs = {x: y for x, y in zip(idx_rel, idx_abs)}
-
-    def generateAlchemicalRegion(self, rotatable_bonds):
-        self._rotatable_bonds = [(self._rel_to_abs[i], self._rel_to_abs[j]) for (i, j) in rotatable_bonds]
-        confgen = _ConformationGenerator(self.system, self._structure, None, self._rotatable_bonds)
-        self._alchemical_atoms = set().union(*list(confgen._rotatable_atoms.values()))
-        all_rotatable_dihedrals = {frozenset(x) for x in self._rotatable_bonds}
-        self._alchemical_dihedral_indices = [i for i, d in enumerate(self._structure.dihedrals) if not d.improper and
-                                             {d.atom2.idx, d.atom3.idx} in all_rotatable_dihedrals]
+    def generateAlchemicalRegion(self):
+        self._rotatable_bonds = [x.rotatable_bond for x in self.moves.moves if isinstance(x, _moves.DihedralMove)]
+        all_rotatable_bonds = {frozenset(x) for x in self._rotatable_bonds}
+        self._alchemical_dihedral_indices = [i for i, d in enumerate(self.structure.dihedrals) if not d.improper and
+                                             {d.atom2.idx, d.atom3.idx} in all_rotatable_bonds]
 
     def equilibrate(self,
                     equilibration_steps=100000,
