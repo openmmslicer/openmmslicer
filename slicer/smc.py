@@ -120,8 +120,8 @@ class SequentialSampler:
             self.runSingleIteration(*args, **kwargs)
         if final_decorrelation_step:
             self.runSingleIteration(*args, **kwargs)
-        total_sampling_time_ns = self.total_sampling_steps * self.integrator.getStepSize() / 1000
-        _logger.info("Total simulation time was {} ns".format(total_sampling_time_ns))
+        total_sampling_time = self.total_sampling_steps * self.integrator.getStepSize().in_units_of(_unit.nanosecond)
+        _logger.info("Total simulation time was {}".format(total_sampling_time))
 
     def runSingleIteration(self,
                            conformer_distribution="uniform",
@@ -273,7 +273,7 @@ class SequentialSampler:
                                                                        self._lambda_, 1., pivot_y=pivot_y,
                                                                        minimum_x=minimum_dlambda, tol=target_metric_tol,
                                                                        maxfun=maximum_metric_evaluations)
-                _logger.debug("Tentative next lambda: {}".format(self.next_lambda_))
+                _logger.debug("Tentative next lambda: {:.8g}".format(self.next_lambda_))
             else:
                 # else use default_dlambda
                 self.next_lambda_ = min(1., self._lambda_ + default_dlambda)
@@ -431,16 +431,19 @@ class SequentialSampler:
 
         # add restraints, if applicable
         if restrain_backbone:
-            _logger.info("Adding equilibration restraints...")
             force = _openmm.CustomExternalForce("k*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
             force.addGlobalParameter("k", force_constant)
             force.addPerParticleParameter("x0")
             force.addPerParticleParameter("y0")
             force.addPerParticleParameter("z0")
-            for i, atom_crd in enumerate(self._structure.positions):
-                if self._structure.atoms[i].name in ('CA', 'C', 'N'):
+            counter = 0
+            for i, atom_crd in enumerate(self.structure.positions):
+                if self.structure.atoms[i].name in ('CA', 'C', 'N'):
                     force.addParticle(i, atom_crd.value_in_unit(_unit.nanometers))
-            force_idx = self.alch_system.addForce(force)
+                    counter += 1
+            if counter:
+                _logger.info("Adding {} equilibration restraints...".format(counter))
+                force_idx = self.alch_system.addForce(force)
 
         # run the equilibration
         _logger.info("Running initial equilibration...")
@@ -449,8 +452,8 @@ class SequentialSampler:
         self.simulation.step(equilibration_steps)
 
         # remove the restraints, if applicable
-        if restrain_backbone:
-            _logger.info("Removing equilibration restraints...")
+        if restrain_backbone and counter:
+            _logger.info("Removing {} equilibration restraints...".format(counter))
             self.alch_system.removeForce(force_idx)
 
         if reporter_filename is not None:
