@@ -381,7 +381,6 @@ class SequentialSampler:
                 # we load from the hard drive
                 if type(state) is tuple:
                     state, transform = state
-                    transform = [transform]
                 # or we don't
                 else:
                     transform = None
@@ -416,6 +415,7 @@ class SequentialSampler:
                     output_interval=100000,
                     reporter_filename=None):
         if reporter_filename is not None:
+            output_interval = min(output_interval, equilibration_steps)
             self.simulation.reporters.append(_reporters.DCDReporter(reporter_filename, output_interval))
 
         # add restraints, if applicable

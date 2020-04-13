@@ -25,8 +25,20 @@ class Move:
     def applyMove(self, *args, **kwargs):
         raise NotImplementedError("This is a virtual method that needs to be overloaded")
 
+    @staticmethod
+    def _contextToQuantity(input):
+        context = None
+        if isinstance(input, _openmm.Context):
+            context = input
+            input = input.getState(getPositions=True)
+        if isinstance(input, _openmm.State):
+            input = input.getPositions(True)
+        if not isinstance(input, _openmm.unit.Quantity):
+            raise TypeError("Array with units, state or context expected")
+        return context, input
 
-class MoveList:
+
+class MoveList(Move):
     def __init__(self, moves):
         self.moves = moves
 
@@ -39,19 +51,11 @@ class MoveList:
         moves = list(zip(*moves))
         return moves
 
-    def applyMove(self, input, move):
-        context = None
-        if isinstance(input, _openmm.Context):
-            context = input
-            input = input.getState(getPositions=True)
-            state = input
-        if isinstance(input, _openmm.State):
-            input = input.getPositions(True)
-        if not isinstance(input, _openmm.unit.Quantity):
-            raise TypeError("Array with units, state or context expected")
+    def applyMove(self, input, transformations):
+        context, input = self._contextToQuantity(input)
 
-        for move, single_move in zip(self.moves, move):
-            input = move.applyMove(input, single_move)
+        for move, transformation in zip(self.moves, transformations):
+            input = move.applyMove(input, transformation)
 
         if context is not None:
             context.setPositions(input)
@@ -110,19 +114,11 @@ class TranslationMove(Move):
         return translations
 
     def applyMove(self, input, translation):
-        context = None
-        if isinstance(input, _openmm.Context):
-            context = input
-            input = input.getState(getPositions=True)
-            state = input
-        if isinstance(input, _openmm.State):
-            input = input.getPositions(True)
-        if not isinstance(input, _openmm.unit.Quantity):
-            raise TypeError("Array with units, state or context expected")
+        context, input = self._contextToQuantity(input)
 
         coords = input[self.movable_atoms].value_in_unit(_unit.nanometer)
-        centre_of_mass = self.masses @ coords / _np.sum(self.masses)
-        input[self.movable_atoms] += translation - centre_of_mass * _unit.nanometer
+        centre_of_mass = self.masses @ coords / _np.sum(self.masses) * _unit.nanometer
+        input[self.movable_atoms] += translation - centre_of_mass
 
         if context is not None:
             context.setPositions(input)
@@ -161,21 +157,13 @@ class RotationMove(Move):
         return rotations
 
     def applyMove(self, input, rotation):
-        context = None
-        if isinstance(input, _openmm.Context):
-            context = input
-            input = input.getState(getPositions=True)
-            state = input
-        if isinstance(input, _openmm.State):
-            input = input.getPositions(True)
-        if not isinstance(input, _openmm.unit.Quantity):
-            raise TypeError("Array with units, state or context expected")
+        context, input = self._contextToQuantity(input)
 
         coords = input[self.movable_atoms].value_in_unit(_unit.nanometer)
         rotation = _Rotation.from_rotvec(rotation)
         centre_of_mass = self.masses @ coords / _np.sum(self.masses)
         coords -= centre_of_mass
-        input[self.movable_atoms] = (rotation.apply(coords)  + centre_of_mass) * input.unit
+        input[self.movable_atoms] = (rotation.apply(coords) + centre_of_mass) * input.unit
 
         if context is not None:
             context.setPositions(input)
@@ -213,16 +201,7 @@ class DihedralMove(Move):
         return 2 * _np.pi * self.sampler(n_states, self.sampling)
 
     def applyMove(self, input, rotation):
-        context = None
-        if isinstance(input, _openmm.Context):
-            context = input
-            input = input.getState(getPositions=True)
-            state = input
-        if isinstance(input, _openmm.State):
-            input = input.getPositions(True)
-        if not isinstance(input, _openmm.unit.Quantity):
-            raise TypeError("Array with units, state or context expected")
-
+        context, input = self._contextToQuantity(input)
         coords = input[self.movable_atoms].value_in_unit(_unit.nanometer)
         bond_vector = (input[self.rotatable_bond[0], :] - input[self.rotatable_bond[1], :]).value_in_unit(
             _unit.nanometers)
