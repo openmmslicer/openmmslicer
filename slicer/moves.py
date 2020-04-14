@@ -3,6 +3,8 @@ from scipy.spatial.transform import Rotation as _Rotation
 from simtk import openmm as _openmm
 from simtk import unit as _unit
 
+import slicer.resampling_methods as _resmethods
+
 
 class Move:
     @staticmethod
@@ -64,7 +66,7 @@ class MoveList(Move):
 
 
 class TranslationMove(Move):
-    def __init__(self, structure, translatable_molecule, sampling="systematic", origin=None, radius=1 * _unit.nanometer,
+    def __init__(self, structure, translatable_molecule, sampling="systematic", origins=None, radii=1 * _unit.nanometer,
                  region="spherical"):
         if type(translatable_molecule) is str:
             for i, residue in enumerate(structure.residues):
@@ -81,12 +83,25 @@ class TranslationMove(Move):
         self.alchemical_atoms = self.movable_atoms[:]
         self.masses = _np.asarray([a.mass for a in structure.residues[translatable_molecule]], dtype=_np.float32)
 
-        if origin is None:
-            self.origin = 0.1 * (self.masses @ structure.coordinates[self.movable_atoms]) / _np.sum(self.masses) * _unit.nanometer
-        else:
-            self.origin = origin
+        Iterable = (list, tuple, _np.ndarray)
 
-        self.radius = radius
+        if isinstance(origins, Iterable):
+            self.origins = origins
+        else:
+            self.origins = [origins]
+
+        for i, origin in enumerate(self.origins):
+            if origin is None:
+                self.origins[i] = 0.1 * (self.masses @ structure.coordinates[self.movable_atoms]) / _np.sum(
+                    self.masses) * _unit.nanometer
+
+        if not isinstance(radii, Iterable):
+            self.radii = [radii] * len(self.origins)
+        else:
+            self.radii = radii
+            if len(self.radii) != len(self.origins):
+                raise ValueError("The number of origins must match the number of radii")
+
         self.region = region
 
     def generateMoves(self, n_states):
@@ -96,6 +111,7 @@ class TranslationMove(Move):
             samples = _np.transpose(_np.asarray([self.sampler(n_states, self.sampling),
                                                  self.sampler(n_states, self.sampling),
                                                  self.sampler(n_states, self.sampling)], dtype=_np.float32))
+            samples = 2 * samples - 1
         elif self.region == "spherical":
             r = self.sampler(n_states, self.sampling) ** (1 / 3)
             cos_theta = 2 * (self.sampler(n_states, self.sampling) - 0.5)
@@ -109,7 +125,20 @@ class TranslationMove(Move):
         else:
             raise ValueError("Only cubic and spherical regions are currently supported")
 
-        translations = self.origin + self.radius * samples
+        x = [i for i in range(len(self.origins))]
+        w = [1 / len(self.origins)] * len(self.origins)
+        if self.sampling == "systematic":
+            resamples = _resmethods.SystematicResampler.resample(x, w, n_walkers=n_states)[0]
+        elif self.sampling == "multinomial":
+            resamples = _resmethods.MultinomialResampler.resample(x, w, n_walkers=n_states)[0]
+        else:
+            raise ValueError("Only systematic and multinomial sampling are currently supported")
+
+        _np.random.shuffle(resamples)
+        origins = _np.asarray([self.origins[i].value_in_unit(_unit.nanometer) for i in resamples])
+        radii = _np.asarray([[self.radii[i].value_in_unit(_unit.nanometer) for i in resamples]])
+
+        translations = (origins + radii.transpose() * samples) * _unit.nanometer
 
         return translations
 
