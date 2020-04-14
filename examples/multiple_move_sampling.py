@@ -18,7 +18,7 @@ structure = pmd.load_file(top, xyz=gro)
 
 # here we perform a relative translation move within 0.1 nm and a rotation move of the LIG residue
 # we also rotate the bond between atoms 1 and 2, where atoms attached to 2 are moved
-moves = [TranslationMove(structure, "LIG", radius=0.1 * unit.nanometer),
+moves = [TranslationMove(structure, "LIG", origins=None, radii=0.1 * unit.nanometer),
          RotationMove(structure, "LIG"),
          DihedralMove(structure, (1, 2))]
 

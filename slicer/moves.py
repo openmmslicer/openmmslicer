@@ -222,7 +222,6 @@ class DihedralMove(Move):
                 movable_atoms |= new_neighbours
             else:
                 break
-            pass
         self.movable_atoms = list(movable_atoms)
         self.alchemical_atoms = self.movable_atoms[:]
 
