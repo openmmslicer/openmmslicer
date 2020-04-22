@@ -49,8 +49,9 @@ class SequentialSampler:
         self.simulation = self.generateSimFromStruct(
             structure, self.alch_system, self.integrator, platform, platform_properties)
         # this is only used for energy evaluation
+        dummy_integrator = _integrators.AlchemicalEnergyEvaluator(alchemical_functions=integrator._alchemical_functions)
         self._dummy_simulation = self.generateSimFromStruct(
-            structure, self.alch_system, _integrators.AlchemicalEnergyEvaluator(), platform, platform_properties)
+            structure, self.alch_system, dummy_integrator, platform, platform_properties)
 
         self.lambda_ = 0
         self.total_sampling_steps = 0
