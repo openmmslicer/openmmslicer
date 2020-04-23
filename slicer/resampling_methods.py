@@ -5,8 +5,30 @@ import numpy as _np
 
 
 class MultinomialResampler:
+    """
+    A basic multinomial resampler which resamples each sample independently of the others with replacement.
+    """
     @staticmethod
     def resample(samples, weights=None, n_walkers=None, n_samples=1):
+        """
+        Resamples samples multinomially based on given weights.
+
+        Parameters
+        ----------
+        samples : list
+            The input samples.
+        weights : list
+            The weights associated with the samples. Default is equal weights.
+        n_walkers: int
+            The number of resampled samples per batch. Default is the length of the samples.
+        n_samples: int
+            The number of resample batches. Default is one.
+
+        Returns
+        -------
+        resamples : [list]
+            A list of lists, containing the resampled samples.
+        """
         if weights is not None:
             weights = _np.asarray(weights)
             weights /= sum(weights)
@@ -20,10 +42,32 @@ class MultinomialResampler:
 
 
 class SystematicResampler:
+    """
+    The most conservative resampler, which preserves as many samples as possible. Based on the method in:
+    http://dx.doi.org/10.3150/12-BEJSP07. An additional review can be found in:
+    http://people.isy.liu.se/rt/schon/Publications/HolSG2006.pdf.
+    """
     @staticmethod
     def resample(samples, weights=None, n_walkers=None, n_samples=1):
-        # this algorithm is based on the method in: http://dx.doi.org/10.3150/12-BEJSP07
-        # additional review: http://people.isy.liu.se/rt/schon/Publications/HolSG2006.pdf
+        """
+        Resamples samples systematically based on given weights.
+
+        Parameters
+        ----------
+        samples : list
+            The input samples.
+        weights : list
+            The weights associated with the samples. Default is equal weights.
+        n_walkers: int
+            The number of resampled samples per batch. Default is the length of the samples.
+        n_samples: int
+            The number of resample batches. Default is one.
+
+        Returns
+        -------
+        resamples : [list]
+            A list of lists, containing the resampled samples.
+        """
         if weights is not None:
             weights = _np.asarray(weights)
             weights /= sum(weights)

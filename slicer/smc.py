@@ -24,6 +24,67 @@ _logger = _logging.getLogger(__name__)
 
 
 class SequentialSampler:
+    """
+        A complete sequential Monte Carlo sampler which can enhance the sampling of certain degrees of freedom.
+
+        Parameters
+        ----------
+        coordinates : str
+            Path to a file which contains all coordinates.
+        structure : parmed.Structure
+            An object containing all structural information.
+        integrator : openmm.Integrator
+            The integrator which should be used during the sampling step.
+        moves : slicer.moves.MoveList or [slicer.moves.Move]
+            All moves which must be applied at lambda = 0.
+        platform : str
+            The platform which should be used for simulation.
+        platform_properties : dict
+            Additional platform properties.
+        npt : bool
+            Whether to add a barostat at 1 atm.
+        md_config : dict
+            Additional parameters passed to generateSystem().
+        alch_config : dict
+            Additional parameters passed to generateAlchSystem().
+
+        Attributes
+        ----------
+        coordinates : str
+            Path to a file which contains all coordinates.
+        moves : [Move]
+            All moves which must be applied at lambda = 0.
+        structure : parmed.Structure
+            An object containing all structural information.
+        system : openmm.System
+            The initial unmodified system.
+        alch_system : openmm.System
+            The modified alchemical system.
+        platform : str
+            The currently used platform.
+        platform_properties : dict
+            The currently used platform properties.
+        integrator : openmm.integrator
+            The integrator used during the sampling step.
+        simulation : openmm.Simulation
+            A simulation object of the current alchemical system.
+        lambda_ : float
+            The current lambda value.
+        total_sampling_steps : int
+            A counter keeping track of the number of times the integrator was called.
+        lambda_history : list
+            A list containing all past lambda values.
+        deltaE_history : list
+            A list containing all past deltaE values.
+        weight_history : list
+            A list containing all past weights used for resampling.
+        reporter_history : list
+            A list containing paths to all past trajectory files.
+        current_states : [int] or [openmm.State]
+            A list containing all current states.
+        logZ : float
+            The current estimate of the dimensionless free energy difference.
+    """
     def __init__(self, coordinates, structure, integrator, moves, platform=None, platform_properties=None,
                  npt=True, md_config=None, alch_config=None):
         if md_config is None:
@@ -78,6 +139,8 @@ class SequentialSampler:
         platform : str, default = None
             Valid choices: 'Auto', 'OpenCL', 'CUDA'
             If None is specified, the fastest available platform will be used.
+        properties : dict
+            Additional platform properties.
 
         Returns
         -------
@@ -106,6 +169,18 @@ class SequentialSampler:
         return simulation
 
     def run(self, final_decorrelation_step=True, *args, **kwargs):
+        """
+        Performs a complete sequential Monte Carlo run until lambda = 1.
+
+        Parameters
+        ----------
+        final_decorrelation_step : bool
+            Whether to decorrelate the final resampled walkers for another number of default_decorrelation_steps.
+        args
+            Positional arguments to be passed to runSingleIteration().
+        kwargs
+            Keyword arguments to be passed to runSingleIteration().
+        """
         while self.lambda_ < 1:
             self.runSingleIteration(*args, **kwargs)
         if final_decorrelation_step:
@@ -131,6 +206,53 @@ class SequentialSampler:
                            equilibration_options=None,
                            dynamically_generate_conformers=True,
                            keep_walkers_in_memory=False):
+        """
+        Performs a single iteration of sequential Monte Carlo.
+
+        Parameters
+        ----------
+        sampling_metric : class
+            A sampling metric with callable methods as described in slicer.sampling_metrics. This metric is used
+            to adaptively determine the optimal sampling time. None removes adaptive sampling.
+        resampling_method : class
+            A resampling method with callable methods as described in slicer.resampling_methods.
+        resampling_metric : class
+            A resampling metric with callable methods as described in slicer.resampling_metrics. This metric is used
+            to adaptively determine the optimal next lambda. None removes adaptive resampling.
+        target_metric_value : float
+            The threshold for the resampling metric. None uses the default value given by the class.
+        target_metric_value_initial : float
+            Same as target_metric_value, but only valid for lambda = 0.
+        target_metric_tol : float
+            The relative tolerance for the resampling metric. None uses the default value given by the class.
+        maximum_metric_evaluations : int
+            The maximum number of energy evaluations to determine the resampling metric.
+        default_dlambda : float
+            Determines the next lambda value. Only used if resampling_metric is None.
+        minimum_dlambda : float
+            The minimum allowed change in lambda.
+        default_decorrelation_steps : int
+            The default number of decorrelation steps. If sampling metric is None, these denote the true number of
+            decorrelation steps.
+        maximum_decorrelation_steps : int
+            The maximum number of decorrelation steps. Only used with adaptive sampling.
+        reporter_filename : str
+            A template containing the reporter filename. Must contain curly brackets, so that python's format() can
+            be called.
+        n_walkers : int
+            The number of walkers to be resampled.
+        n_conformers_per_walker : int
+            How many conformers to generate for each walker using self.moves. Only used at lambda = 0.
+        equilibration_options : dict
+            Parameters to be passed to equilibrate(). Only used at lambda = 0.
+        dynamically_generate_conformers : bool
+            Whether to store the extra conformers as states or as transformations. The former is much faster, but also
+            extremely memory-intensive. Only set to False if you are certain that you have enough memory.
+        keep_walkers_in_memory : bool
+            Whether to keep the walkers as states or load them dynamically from the hard drive. The former is much
+            faster during the energy evaluation step but is more memory-intensive. Only set to True if you are certain
+            that you have enough memory.
+        """
         if not keep_walkers_in_memory and reporter_filename is None:
             raise ValueError("Need to set a reporter if trajectory is not kept in memory.")
         if not keep_walkers_in_memory and not dynamically_generate_conformers:
@@ -315,10 +437,12 @@ class SequentialSampler:
 
     @property
     def alchemical_atoms(self):
+        """[int]: The absolute indices of all alchemical atoms."""
         return self.moves.alchemical_atoms
 
     @property
     def kT(self):
+        """openmm.unit.Quantity: The current temperature multiplied by the gas constant."""
         try:
             kB = _unit.BOLTZMANN_CONSTANT_kB * _unit.AVOGADRO_CONSTANT_NA
             kT = kB * self.integrator.getTemperature()
@@ -328,6 +452,7 @@ class SequentialSampler:
 
     @property
     def moves(self):
+        """The list of moves which must be performed at lambda = 0."""
         return self._moves
 
     @moves.setter
@@ -340,10 +465,12 @@ class SequentialSampler:
 
     @property
     def n_walkers(self):
+        """int: The number of current walkers."""
         return len(self.current_states)
 
     @property
     def temperature(self):
+        """openmm.unit.Quantity: The temperature of the current integrator."""
         try:
             T = self.integrator.getTemperature()
             return T
@@ -351,6 +478,24 @@ class SequentialSampler:
             return None
 
     def calculateStateEnergies(self, lambda_, states=None, extra_conformers=None, *args, **kwargs):
+        """
+        Calculates the reduced potential energies of all states for a given lambda value.
+
+        Parameters
+        ----------
+        lambda_ : float
+            The desired lambda value.
+        states : [int] or [openmm.State] or None
+            Which states need to be used. If None, self.current_states are used. Otherwise, these could be in any
+            format supported by setState().
+        extra_conformers : list
+            Extra conformers relevant for lambda = 0. These could be either a list of openmm.State or a list of
+            transformations which can be generated dynamically.
+        args
+            Positional arguments to be passed to setState().
+        kwargs
+            Keyword arguments to be passed to setState().
+        """
         if states is None:
             states = self.current_states
 
@@ -392,6 +537,20 @@ class SequentialSampler:
         return _np.asarray(energies, dtype=_np.float32)
 
     def setState(self, state, context, reporter_filename=None, transform=None):
+        """
+        Sets a given state to the current context.
+
+        Parameters
+        ----------
+        state : int, openmm.State
+            Either sets the state from a State object or from a frame of a trajectory file given by reporter_filename.
+        context : openmm.Context
+            The context to which the state needs to be applied.
+        reporter_filename : str
+            The path to the trajectory file containing the relevant frame, if applicable.
+        transform :
+            Optionally generate a transform dynamically from a format, specific to the underlying moves.
+        """
         if type(state) is int:
             frame = _mdtraj.load_frame(reporter_filename, state, self.coordinates)
             positions = frame.xyz[0]
@@ -404,6 +563,7 @@ class SequentialSampler:
             self.moves.applyMove(context, transform)
 
     def generateAlchemicalRegion(self):
+        """Makes sure that all rotated dihedrals are also made alchemical."""
         self._rotatable_bonds = [x.rotatable_bond for x in self.moves.moves if isinstance(x, _moves.DihedralMove)]
         all_rotatable_bonds = {frozenset(x) for x in self._rotatable_bonds}
         self._alchemical_dihedral_indices = [i for i, d in enumerate(self.structure.dihedrals) if not d.improper and
@@ -415,6 +575,22 @@ class SequentialSampler:
                     force_constant=5.0 * _unit.kilocalories_per_mole / _unit.angstroms ** 2,
                     output_interval=100000,
                     reporter_filename=None):
+        """
+        Equilibrates the system at lambda = 0.
+
+        Parameters
+        ----------
+        equilibration_steps : int
+            The number of equilibration steps.
+        restrain_backbone : bool
+            Whether to restrain all atoms with the following names: 'CA', 'C', 'N'.
+        force_constant : openmm.unit.Quantity
+            The magnitude of the restraint force constant.
+        output interval : int
+            How often to output to a trajectory file.
+        reporter_filename : str
+            The path to the trajectory file.
+        """
         if reporter_filename is not None:
             output_interval = min(output_interval, equilibration_steps)
             self.simulation.reporters.append(_reporters.DCDReporter(reporter_filename, output_interval))
@@ -521,7 +697,7 @@ class SequentialSampler:
 
         Returns
         -------
-        openmm.System
+        system : openmm.System
             System formatted according to the prmtop file.
 
         Notes
@@ -552,7 +728,7 @@ class SequentialSampler:
         """Returns the OpenMM System for alchemical perturbations.
         This function calls `openmmtools.alchemy.AbsoluteAlchemicalFactory` and
         `openmmtools.alchemy.AlchemicalRegion` to generate the System for the
-        NCMC simulation.
+        SMC simulation.
 
         Parameters
         ----------
@@ -641,9 +817,9 @@ class SequentialSampler:
         ----------
         system : openmm.System
             The OpenMM System object corresponding to the reference system.
-        temperature : float, default=298
-            temperature (Kelvin) to be simulated at.
-        pressure : int, configional, default=None
+        temperature : openmm.unit.Quantity
+            Temperature (Kelvin) to be simulated at.
+        pressure : openmm.unit.Quantity
             Pressure (atm) for Barostat for NPT simulations.
         frequency : int, default=25
             Frequency at which Monte Carlo pressure changes should be attempted (in time steps)

@@ -9,6 +9,22 @@ import slicer.resampling_methods as _resmethods
 class Move:
     @staticmethod
     def sampler(n_samples, sampling="systematic"):
+        """
+        Samples from the uniform distribution between 0 and 1 using different sampling methods.
+
+        Parameters
+        ----------
+        n_samples : int
+            Number of uniform samples to be generated.
+        sampling : str
+            One of "multinomial" - independent sampling of each sample and "systematic" - sampling on an evenly
+            spaced grid with a randomly generated offset.
+
+        Returns
+        -------
+        samples : numpy.ndarray
+            An array of all generated samples.
+        """
         sampling = sampling.lower()
 
         if sampling == "systematic":
@@ -22,13 +38,36 @@ class Move:
         return samples
 
     def generateMoves(self, *args, **kwargs):
+        """
+        Generates an array of moves which can be read by applyMove(). This is a virtual function which must be
+        overloaded in the child classes.
+        """
         raise NotImplementedError("This is a virtual method that needs to be overloaded")
 
     def applyMove(self, *args, **kwargs):
+        """
+        Applies a move generated from generateMoves(). This is a virtual function which must be overloaded in
+        the child classes.
+        """
         raise NotImplementedError("This is a virtual method that needs to be overloaded")
 
     @staticmethod
     def _contextToQuantity(input):
+        """
+        A helper function which converts a number of input formats to standardised objects to be passed to applyMove().
+
+        Parameters
+        ----------
+        input : openmm.Context or openmm.State or openmm.unit.Quantity
+            Input which contains coordinate information with units.
+
+        Returns
+        -------
+        context : openmm.Context or None
+            The context, if applicable.
+        input : openmm.unit.Quantity
+            An array of coordinates with units.
+        """
         context = None
         if isinstance(input, _openmm.Context):
             context = input
@@ -41,19 +80,63 @@ class Move:
 
 
 class MoveList(Move):
+    """
+    A class which combines multiple moves.
+
+    Parameters
+    ----------
+    moves : [Move]
+        The instantiated moves to be combined.
+
+    Attributes
+    ----------
+    moves : [Move]
+        A list of moves.
+    """
     def __init__(self, moves):
         self.moves = moves
 
     @property
     def alchemical_atoms(self):
+        """[int]: Returns the combined alchemical atoms of all moves."""
         return list(set().union(*[move.alchemical_atoms for move in self.moves]))
 
-    def generateMoves(self, n_samples):
-        moves = [move.generateMoves(n_samples) for move in self.moves]
-        moves = list(zip(*moves))
-        return moves
+    def generateMoves(self, n_states):
+        """
+        Generates a list of transformations for each move.
+
+        Parameters
+        ----------
+        n_states : int
+            Number of samples to be generated.
+
+        Returns
+        -------
+        transformations : list
+            A list of all transformations.
+        """
+        transformations = [move.generateMoves(n_states) for move in self.moves]
+        transformations = list(zip(*transformations))
+        return transformations
 
     def applyMove(self, input, transformations):
+        """
+        Applies a single transformation to a state, context or quantity. If a context is passed, it it also modified
+        in place.
+
+        Parameters
+        ----------
+        input : openmm.Context or openmm.State or openmm.unit.Quantity
+            Input containing coordinate information.
+        transformations : list
+            A list of all transformations to be passed to self.moves. Each transformation must be of an appropriate
+            format for the underlying move.
+
+        Returns
+        -------
+        input : openmm.unit.Quantity
+            The transformed coordinates.
+        """
         context, input = self._contextToQuantity(input)
 
         for move, transformation in zip(self.moves, transformations):
@@ -66,6 +149,43 @@ class MoveList(Move):
 
 
 class TranslationMove(Move):
+    """
+    A class which performs translation around one or more centres.
+
+    Parameters
+    ----------
+    structure : parmed.Structure
+        An object containing all of the information about the system.
+    translatable_molecule : str or int
+        If string, this is the first residue which has this residue name. If number, this is the index of the desired
+        residue (starting from 0).
+    sampling : str
+        One of "multinomial" or "systematic" - to be passed to Move.sampler().
+    origins : [openmm.Quantity] or None
+        Initialises origins. None stands for translation around current centre of mass.
+    radii : [openmm.Quantity]
+        Initialises radii. Must be of the same length as origins.
+    region : str
+        Initialises region. One of "spherical" or "cubic". If cubic, the radii stand for half of the translation box
+        length.
+
+    Attributes
+    ----------
+    sampling : str
+        One of "multinomial" or "systematic" - to be passed to Move.sampler().
+    movable_atoms : [int]
+        A list of the absolute indices of all movable atoms.
+    alchemical_atoms : [int]
+        A list of the absolute indices of all alchemical atoms.
+    masses : numpy.ndarray
+        An array of masses of the residue to be translated.
+    origins : [openmm.Quantity]
+        A list of one or more origins around which the samples should be centred.
+    radii : [openmm.Quantity]
+        A list of radii which determine the radius of sampling around each of the origins.
+    region : str
+        Determines the shape of the sampling area. One of "spherical" or "cubic".
+    """
     def __init__(self, structure, translatable_molecule, sampling="systematic", origins=None, radii=1 * _unit.nanometer,
                  region="spherical"):
         if type(translatable_molecule) is str:
@@ -105,6 +225,19 @@ class TranslationMove(Move):
         self.region = region
 
     def generateMoves(self, n_states):
+        """
+        Generates a list of translations.
+
+        Parameters
+        ----------
+        n_states : int
+            Number of samples to be generated.
+
+        Returns
+        -------
+        translations : openmm.Quantity
+            A numpy array with units containing n_states rows and 3 columns, which specifies the new centres of mass.
+        """
         self.region = self.region.lower()
 
         if self.region == "cubic":
@@ -143,6 +276,22 @@ class TranslationMove(Move):
         return translations
 
     def applyMove(self, input, translation):
+        """
+        Applies a single translation to a state, context or quantity. If a context is passed, it it also modified
+        in place.
+
+        Parameters
+        ----------
+        input : openmm.Context or openmm.State or openmm.unit.Quantity
+            Input containing coordinate information.
+        translation : openmm.unit.Quantity
+            Coordinates of the new centre of mass.
+
+        Returns
+        -------
+        input : openmm.unit.Quantity
+            The transformed coordinates.
+        """
         context, input = self._contextToQuantity(input)
 
         coords = input[self.movable_atoms].value_in_unit(_unit.nanometer)
@@ -156,6 +305,30 @@ class TranslationMove(Move):
 
 
 class RotationMove(Move):
+    """
+    A class which performs rotation around centre of mass.
+
+    Parameters
+    ----------
+    structure : parmed.Structure
+        An object containing all of the information about the system.
+    rotatable_molecule : str or int
+        If string, this is the first residue which has this residue name. If number, this is the index of the desired
+        residue (starting from 0).
+    sampling : str
+        One of "multinomial" or "systematic" - to be passed to Move.sampler().
+
+    Attributes
+    ----------
+    sampling : str
+        One of "multinomial" or "systematic" - to be passed to Move.sampler().
+    movable_atoms : [int]
+        A list of the absolute indices of all movable atoms.
+    alchemical_atoms : [int]
+        A list of the absolute indices of all alchemical atoms.
+    masses : numpy.ndarray
+        An array of masses of the residue to be translated.
+    """
     def __init__(self, structure, rotatable_molecule, sampling="systematic"):
         if type(rotatable_molecule) is str:
             for i, residue in enumerate(structure.residues):
@@ -173,6 +346,20 @@ class RotationMove(Move):
         self.masses = _np.asarray([a.mass for a in structure.residues[rotatable_molecule]], dtype=_np.float32)
 
     def generateMoves(self, n_states):
+        """
+        Generates a list of translations.
+
+        Parameters
+        ----------
+        n_states : int
+            Number of samples to be generated.
+
+        Returns
+        -------
+        rotations : numpy.ndarray
+            A numpy array containing n_states rows and 3 columns, which specifies the rotations around the centre of
+            mass.
+        """
         rotations = _np.zeros((n_states, 3))
 
         thetas = _np.arccos(2 * self.sampler(n_states, self.sampling) - 1)
@@ -186,6 +373,23 @@ class RotationMove(Move):
         return rotations
 
     def applyMove(self, input, rotation):
+        """
+        Applies a single rotation to a state, context or quantity. If a context is passed, it it also modified
+        in place.
+
+        Parameters
+        ----------
+        input : openmm.Context or openmm.State or openmm.unit.Quantity
+            Input containing coordinate information.
+        rotation : numpy.ndarray
+            A numpy vector whose direction specifies the axis of rotation and whose norm specifies the angle of
+            anticlockwise rotaion.
+
+        Returns
+        -------
+        input : openmm.unit.Quantity
+            The transformed coordinates.
+        """
         context, input = self._contextToQuantity(input)
 
         coords = input[self.movable_atoms].value_in_unit(_unit.nanometer)
@@ -201,6 +405,35 @@ class RotationMove(Move):
 
 
 class DihedralMove(Move):
+    """
+    A class which performs rotation around centre of mass.
+
+    Parameters
+    ----------
+    structure : parmed.Structure
+        An object containing all of the information about the system.
+    rotatable_bond : (int, int)
+        A tuple of the indices of the two atoms defining the rotatable bond. If residue is None, absolute indices
+        are required. Otherwise, relative indices must be used. Only the substituents of the second atom are moved.
+    residue : str or int or None
+        If string, this is the first residue which has this residue name. If number, this is the index of the desired
+        residue (starting from 0). If None, absolute atom indices must be passed to rotatable_bond.
+    sampling : str
+        One of "multinomial" or "systematic" - to be passed to Move.sampler().
+
+    Attributes
+    ----------
+    sampling : str
+        One of "multinomial" or "systematic" - to be passed to Move.sampler().
+    rotatable_bond : (int, int)
+        A tuple of the absolute indices of the two atoms defining the rotatable bond. Only the substituents of the
+        second atom are moved.
+    movable_atoms : [int]
+        A list of the absolute indices of all movable atoms.
+    alchemical_atoms : [int]
+        A list of the absolute indices of all alchemical atoms.
+
+    """
     def __init__(self, structure, rotatable_bond, residue=None, sampling="systematic"):
         if residue is not None:
             if type(residue) is str:
@@ -226,9 +459,40 @@ class DihedralMove(Move):
         self.alchemical_atoms = self.movable_atoms[:]
 
     def generateMoves(self, n_states):
+        """
+        Generates a list of translations.
+
+        Parameters
+        ----------
+        n_states : int
+            Number of samples to be generated.
+
+        Returns
+        -------
+        rotations : numpy.ndarray
+            A numpy array containing n_states rows and 3 columns, which specifies the rotations around the rotatable
+            bond.
+        """
         return 2 * _np.pi * self.sampler(n_states, self.sampling)
 
     def applyMove(self, input, rotation):
+        """
+        Applies a single dihedral rotation to a state, context or quantity. If a context is passed, it it also modified
+        in place.
+
+        Parameters
+        ----------
+        input : openmm.Context or openmm.State or openmm.unit.Quantity
+            Input containing coordinate information.
+        rotation : numpy.ndarray
+            A numpy vector whose direction specifies the axis of rotation and whose norm specifies the angle of
+            anticlockwise rotaion.
+
+        Returns
+        -------
+        input : openmm.unit.Quantity
+            The transformed coordinates.
+        """
         context, input = self._contextToQuantity(input)
         coords = input[self.movable_atoms].value_in_unit(_unit.nanometer)
         bond_vector = (input[self.rotatable_bond[0], :] - input[self.rotatable_bond[1], :]).value_in_unit(
