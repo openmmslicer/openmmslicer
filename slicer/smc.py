@@ -25,65 +25,65 @@ _logger = _logging.getLogger(__name__)
 
 class SequentialSampler:
     """
-        A complete sequential Monte Carlo sampler which can enhance the sampling of certain degrees of freedom.
+    A complete sequential Monte Carlo sampler which can enhance the sampling of certain degrees of freedom.
 
-        Parameters
-        ----------
-        coordinates : str
-            Path to a file which contains all coordinates.
-        structure : parmed.Structure
-            An object containing all structural information.
-        integrator : openmm.Integrator
-            The integrator which should be used during the sampling step.
-        moves : slicer.moves.MoveList or [slicer.moves.Move]
-            All moves which must be applied at lambda = 0.
-        platform : str
-            The platform which should be used for simulation.
-        platform_properties : dict
-            Additional platform properties.
-        npt : bool
-            Whether to add a barostat at 1 atm.
-        md_config : dict
-            Additional parameters passed to generateSystem().
-        alch_config : dict
-            Additional parameters passed to generateAlchSystem().
+    Parameters
+    ----------
+    coordinates : str
+        Path to a file which contains all coordinates.
+    structure : parmed.Structure
+        An object containing all structural information.
+    integrator : openmm.Integrator
+        The integrator which should be used during the sampling step.
+    moves : slicer.moves.MoveList or [slicer.moves.Move]
+        All moves which must be applied at lambda = 0.
+    platform : str
+        The platform which should be used for simulation.
+    platform_properties : dict
+        Additional platform properties.
+    npt : bool
+        Whether to add a barostat at 1 atm.
+    md_config : dict
+        Additional parameters passed to generateSystem().
+    alch_config : dict
+        Additional parameters passed to generateAlchSystem().
 
-        Attributes
-        ----------
-        coordinates : str
-            Path to a file which contains all coordinates.
-        moves : [Move]
-            All moves which must be applied at lambda = 0.
-        structure : parmed.Structure
-            An object containing all structural information.
-        system : openmm.System
-            The initial unmodified system.
-        alch_system : openmm.System
-            The modified alchemical system.
-        platform : str
-            The currently used platform.
-        platform_properties : dict
-            The currently used platform properties.
-        integrator : openmm.integrator
-            The integrator used during the sampling step.
-        simulation : openmm.Simulation
-            A simulation object of the current alchemical system.
-        lambda_ : float
-            The current lambda value.
-        total_sampling_steps : int
-            A counter keeping track of the number of times the integrator was called.
-        lambda_history : list
-            A list containing all past lambda values.
-        deltaE_history : list
-            A list containing all past deltaE values.
-        weight_history : list
-            A list containing all past weights used for resampling.
-        reporter_history : list
-            A list containing paths to all past trajectory files.
-        current_states : [int] or [openmm.State]
-            A list containing all current states.
-        logZ : float
-            The current estimate of the dimensionless free energy difference.
+    Attributes
+    ----------
+    coordinates : str
+        Path to a file which contains all coordinates.
+    moves : [Move]
+        All moves which must be applied at lambda = 0.
+    structure : parmed.Structure
+        An object containing all structural information.
+    system : openmm.System
+        The initial unmodified system.
+    alch_system : openmm.System
+        The modified alchemical system.
+    platform : str
+        The currently used platform.
+    platform_properties : dict
+        The currently used platform properties.
+    integrator : openmm.integrator
+        The integrator used during the sampling step.
+    simulation : openmm.Simulation
+        A simulation object of the current alchemical system.
+    lambda_ : float
+        The current lambda value.
+    total_sampling_steps : int
+        A counter keeping track of the number of times the integrator was called.
+    lambda_history : list
+        A list containing all past lambda values.
+    deltaE_history : list
+        A list containing all past deltaE values.
+    weight_history : list
+        A list containing all past weights used for resampling.
+    reporter_history : list
+        A list containing paths to all past trajectory files.
+    current_states : [int] or [openmm.State]
+        A list containing all current states.
+    logZ : float
+        The current estimate of the dimensionless free energy difference.
     """
     def __init__(self, coordinates, structure, integrator, moves, platform=None, platform_properties=None,
                  npt=True, md_config=None, alch_config=None):
@@ -126,7 +126,8 @@ class SequentialSampler:
 
     @classmethod
     def generateSimFromStruct(cls, structure, system, integrator, platform=None, properties=None, **kwargs):
-        """Generate the OpenMM Simulation objects from a given parmed.Structure()
+        """
+        Generate the OpenMM Simulation objects from a given parmed.Structure()
 
         Parameters
         ----------
@@ -725,7 +726,8 @@ class SequentialSampler:
                            alchemical_pme_treatment='direct-space',
                            suppress_warnings=True,
                            **kwargs):
-        """Returns the OpenMM System for alchemical perturbations.
+        """
+        Returns the OpenMM System for alchemical perturbations.
         This function calls `openmmtools.alchemy.AbsoluteAlchemicalFactory` and
         `openmmtools.alchemy.AlchemicalRegion` to generate the System for the
         SMC simulation.
