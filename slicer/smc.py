@@ -181,17 +181,14 @@ class SequentialSampler:
 
         return simulation
 
-    def run(self, save_checkpoint=True, checkpoint_filename="checkpoint.pickle", final_decorrelation_step=True,
-            *args, **kwargs):
+    def run(self, checkpoint_filename="checkpoint.pickle", final_decorrelation_step=True, *args, **kwargs):
         """
         Performs a complete sequential Monte Carlo run until lambda = 1.
 
         Parameters
         ----------
-        save_checkpoint : bool
-            Whether to save a checkpoint file.
         checkpoint_filename : str
-            Path to the pickle filename to save the checkpoint to. Only valid if save_checkpoint is True.
+            Path to the pickle filename to save the checkpoint to. None means no checkpoint is saved.
         final_decorrelation_step : bool
             Whether to decorrelate the final resampled walkers for another number of default_decorrelation_steps.
         args
@@ -201,7 +198,7 @@ class SequentialSampler:
         """
         def runAndSave():
             self.runSingleIteration(*args, **kwargs)
-            if save_checkpoint:
+            if checkpoint_filename is not None:
                 self.saveCheckpoint(checkpoint_filename)
 
         while self.lambda_ < 1:
