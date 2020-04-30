@@ -463,7 +463,7 @@ class SequentialSampler:
 
     def saveCheckpoint(self, filename="checkpoint.pickle", *args, **kwargs):
         """
-        Performs a complete sequential Monte Carlo run until lambda = 1.
+        Saves a pickled checkpoint file.
 
         Parameters
         ----------
