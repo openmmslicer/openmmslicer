@@ -311,7 +311,8 @@ class SequentialSampler:
                         self.reporter_history = [x for x in self.reporter_history if x != prev_reporter_filename]
                         self.reporter_history[-1] = prev_reporter_filename
                     else:
-                        backup_filename = _os.path.splitext(curr_reporter_filename)[0] + "_backup.dcd"
+                        backup_filebase, ext = _os.path.splitext(curr_reporter_filename)
+                        backup_filename = backup_filebase + "_backup" + ext
                         _os.rename(curr_reporter_filename, backup_filename)
                         self.reporter_history = [backup_filename if x == curr_reporter_filename else x
                                                  for x in self.reporter_history]
