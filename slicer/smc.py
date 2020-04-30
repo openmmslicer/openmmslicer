@@ -4,6 +4,7 @@ import logging as _logging
 import os as _os
 import pickle as _pickle
 import random as _random
+import shutil as _shutil
 
 import mdtraj as _mdtraj
 import mdtraj.reporters as _reporters
@@ -181,14 +182,12 @@ class SequentialSampler:
 
         return simulation
 
-    def run(self, checkpoint_filename="checkpoint.pickle", final_decorrelation_step=True, *args, **kwargs):
+    def run(self, final_decorrelation_step=True, *args, **kwargs):
         """
         Performs a complete sequential Monte Carlo run until lambda = 1.
 
         Parameters
         ----------
-        checkpoint_filename : str
-            Path to the pickle filename to save the checkpoint to. None means no checkpoint is saved.
         final_decorrelation_step : bool
             Whether to decorrelate the final resampled walkers for another number of default_decorrelation_steps.
         args
@@ -196,15 +195,15 @@ class SequentialSampler:
         kwargs
             Keyword arguments to be passed to runSingleIteration().
         """
-        def runAndSave():
+        def runOnce():
             self.runSingleIteration(*args, **kwargs)
-            if checkpoint_filename is not None:
-                self.saveCheckpoint(checkpoint_filename)
+            if "load_instant_checkpoint" in kwargs.keys():
+                kwargs.pop("load_instant_checkpoint")
 
         while self.lambda_ < 1:
-            runAndSave()
+            runOnce()
         if final_decorrelation_step:
-            runAndSave()
+            runOnce()
         total_sampling_time = self.total_sampling_steps * self.integrator.getStepSize().in_units_of(_unit.nanosecond)
         _logger.info("Total simulation time was {}".format(total_sampling_time))
 
@@ -225,7 +224,10 @@ class SequentialSampler:
                            n_conformers_per_walker=100,
                            equilibration_options=None,
                            dynamically_generate_conformers=True,
-                           keep_walkers_in_memory=False):
+                           keep_walkers_in_memory=False,
+                           write_checkpoint=None,
+                           write_instant_checkpoint=None,
+                           load_instant_checkpoint=None):
         """
         Performs a single iteration of sequential Monte Carlo.
 
@@ -272,13 +274,28 @@ class SequentialSampler:
             Whether to keep the walkers as states or load them dynamically from the hard drive. The former is much
             faster during the energy evaluation step but is more memory-intensive. Only set to True if you are certain
             that you have enough memory.
+        write_checkpoint : str
+            Describes a path to a checkpoint file written after completing the whole SMC iteration. None means no such
+            file will be written.
+        write_instant_checkpoint : str
+            Describes a path to a checkpoint file written immediately after the decorrelation steps for each walker.
+            None means no such file will be written.
+        load_instant_checkpoint : str
+            Describes a path to a checkpoint file written with write_instant_checkpoint. In order to use this, the same
+            arguments must be passed to this function as when the instant checkpoint file was written. This option
+            also typically requires that the SequentialSampler was instantiated with a particular checkpoint. None
+            means that this function proceeds as normal.
         """
         if not keep_walkers_in_memory and reporter_filename is None:
             raise ValueError("Need to set a reporter if trajectory is not kept in memory.")
         if not keep_walkers_in_memory and not dynamically_generate_conformers:
             raise ValueError("Cannot store extra conformers in memory if the walkers are not kept in memory.")
+        if write_instant_checkpoint and reporter_filename is None:
+            raise ValueError("Need to set a reporter when storing a checkpoint.")
         if _inspect.isclass(sampling_metric):
             sampling_metric = sampling_metric(self)
+        reporter_filename = _os.path.abspath(reporter_filename) if reporter_filename else None
+        write_instant_checkpoint = _os.path.abspath(write_instant_checkpoint) if write_instant_checkpoint else None
         default_decorrelation_steps = max(1, default_decorrelation_steps)
 
         # equilibrate if lambda = 0
@@ -296,12 +313,35 @@ class SequentialSampler:
         elapsed_steps = 0
         while True:
             extra_conformers = []
+            all_transforms = []
+
+            # load instant checkpoint, if applicable
+            if load_instant_checkpoint:
+                _logger.info("Loading instant checkpoint...")
+                elapsed_steps, all_transforms, n, sampling_metric_backup, resampling_metric_backup, \
+                 self.reporter_history = _pickle.load(open(load_instant_checkpoint, "rb"))
+                extra_conformers = all_transforms[:]
+                assert not ((sampling_metric is None) ^ (sampling_metric_backup is None)), \
+                    "Need to provide the same type of sampling metric as the backup"
+                assert not ((resampling_metric is None) ^ (resampling_metric_backup is None)), \
+                    "Need to provide the same type of resampling metric as the backup"
+                if sampling_metric_backup is not None:
+                    sampling_metric.__dict__.update(sampling_metric_backup)
+                if resampling_metric_backup is not None:
+                    resampling_metric.__dict__.update(resampling_metric_backup)
+                if not self.lambda_:
+                    last_frame = _mdtraj.load(self.reporter_history[-1], top=self.coordinates).n_frames - 1
+                    generator = [(i, last_frame) for i in range(n + 1, len(self.current_states))]
+                else:
+                    generator = [(i, i) for i in range(n + 1, len(self.current_states))]
+            else:
+                generator = enumerate(self.current_states)
 
             # set up reporter, if applicable
             if reporter_filename:
                 curr_reporter_filename = reporter_filename.format(round(self.lambda_, 8))
                 if _os.path.exists(curr_reporter_filename):
-                    if elapsed_steps:
+                    if elapsed_steps and not load_instant_checkpoint:
                         prev_reporter_filebase, ext = _os.path.splitext(curr_reporter_filename)
                         prev_reporter_filename = prev_reporter_filebase + "_prev" + ext
                         _os.rename(curr_reporter_filename, prev_reporter_filename)
@@ -318,7 +358,7 @@ class SequentialSampler:
                                                                         default_decorrelation_steps))
 
             # sample
-            for n, state in enumerate(self.current_states):
+            for n, state in generator:
                 prev_reporter_filename = None if not len(self.reporter_history) else self.reporter_history[-1]
                 if type(state) is tuple:
                     state, transform = state
@@ -335,9 +375,11 @@ class SequentialSampler:
                         _logger.info("Generating {} total conformers...".format(n_walkers * n_conformers_per_walker))
                     target_metric_value = target_metric_value_initial
                     transforms = self.moves.generateMoves(n_conformers_per_walker)
+                    all_transforms += [transforms]
                     if dynamically_generate_conformers:
                         extra_conformers += [transforms]
                     else:
+                        state = self.simulation.context.getState(getPositions=True)
                         for t in transforms:
                             self.moves.applyMove(self.simulation.context, t)
                             extra_conformers += [self.simulation.context.getState(getPositions=True)]
@@ -348,6 +390,32 @@ class SequentialSampler:
                     self.current_states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
                 else:
                     self.current_states[n] = n
+
+                # store instant checkpoint, if applicable
+                if write_instant_checkpoint:
+                    sampling_metric_backup = sampling_metric.serialise() if sampling_metric is not None else None
+                    resampling_metric_backup = resampling_metric.serialise() if resampling_metric is not None else None
+                    backups = (elapsed_steps, all_transforms, n, sampling_metric_backup,
+                               resampling_metric_backup, self.reporter_history)
+                    _logger.debug("Writing instant checkpoint...")
+                    _pickle.dump(backups, open(write_instant_checkpoint, "wb"))
+
+            # concatenate the previous and the current trajectory in case we are loading an instant checkpoint
+            if load_instant_checkpoint:
+                if _os.path.exists(curr_reporter_filename):
+                    traj_prev = _mdtraj.load(backup_filename, top=self.coordinates)
+                    traj_curr = _mdtraj.load(curr_reporter_filename, top=self.coordinates)
+                    traj_concat = _mdtraj.join([traj_prev, traj_curr])
+                    concat_filename = "concat" + _os.path.splitext(curr_reporter_filename)[-1]
+                    traj_concat.save(concat_filename)
+                    _os.remove(curr_reporter_filename)
+                    _shutil.move(concat_filename, curr_reporter_filename)
+                    _os.remove(backup_filename)
+                else:
+                    _shutil.move(self.reporter_history[-1], curr_reporter_filename)
+                    self.reporter_history[-1] = curr_reporter_filename
+                load_instant_checkpoint = None
+
             elapsed_steps += default_decorrelation_steps
             self.total_sampling_steps += default_decorrelation_steps * n_walkers
 
@@ -459,6 +527,14 @@ class SequentialSampler:
         _logger.info("Current accumulated logZ: {:.8g}".format(self.logZ))
         _logger.info("Next lambda: {:.8g}".format(self.lambda_))
 
+        # save checkpoint
+        if write_checkpoint is not None:
+            self.saveCheckpoint(write_checkpoint)
+
+        # we no longer need the instant checkpoint
+        if write_instant_checkpoint:
+            _os.remove(write_instant_checkpoint)
+
     def saveCheckpoint(self, filename="checkpoint.pickle", *args, **kwargs):
         """
         Saves a pickled checkpoint file.
@@ -475,6 +551,7 @@ class SequentialSampler:
         new_self = _copy.copy(self)
         new_self.__dict__ = {x: y for x, y in new_self.__dict__.items() if x in self._picklable_attrs}
         new_self.current_states = [i for i in range(len(self.current_states))]
+        filename = _os.path.abspath(filename)
         if _os.path.exists(filename):
             _os.rename(filename, filename + ".old")
         _logger.info("Saving checkpoint...")
@@ -671,6 +748,7 @@ class SequentialSampler:
 
         if reporter_filename is not None:
             self.simulation.reporters = []
+            self.reporter_history += [reporter_filename]
 
     @staticmethod
     def generateSystem(structure, **kwargs):

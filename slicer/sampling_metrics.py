@@ -67,3 +67,6 @@ class EnergyCorrelation:
         """Resets the sampling metric."""
         self.E_before = []
         self.E_after = []
+
+    def serialise(self):
+        return {x: y for x, y in self.__dict__.items() if x != "ensemble"}
