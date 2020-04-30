@@ -2,6 +2,7 @@ import copy as _copy
 import inspect as _inspect
 import logging as _logging
 import os as _os
+import pickle as _pickle
 import random as _random
 
 import mdtraj as _mdtraj
@@ -43,6 +44,9 @@ class SequentialSampler:
         Additional platform properties.
     npt : bool
         Whether to add a barostat at 1 atm.
+    checkpoint : str
+        A path to a pickled checkpoint file to load SequentialSampler from. If this is None, SequentialSampler is
+        initialised normally.
     md_config : dict
         Additional parameters passed to generateSystem().
     alch_config : dict
@@ -85,8 +89,11 @@ class SequentialSampler:
     logZ : float
         The current estimate of the dimensionless free energy difference.
     """
+    _picklable_attrs = ["lambda_", "total_sampling_steps", "lambda_history", "deltaE_history", "weight_history",
+                        "reporter_history", "logZ"]
+
     def __init__(self, coordinates, structure, integrator, moves, platform=None, platform_properties=None,
-                 npt=True, md_config=None, alch_config=None):
+                 npt=True, checkpoint=None, md_config=None, alch_config=None):
         if md_config is None:
             md_config = {}
         if alch_config is None:
@@ -114,15 +121,20 @@ class SequentialSampler:
         self._dummy_simulation = self.generateSimFromStruct(
             structure, self.alch_system, dummy_integrator, platform, platform_properties)
 
-        self.lambda_ = 0
-        self.total_sampling_steps = 0
-        self.lambda_history = [0]
-        self.deltaE_history = []
-        self.weight_history = []
-        self.reporter_history = []
-        self.current_states = []
-
-        self.logZ = 0
+        if checkpoint is not None:
+            _logger.info("Loading checkpoint...")
+            obj = _pickle.load(open(checkpoint, "rb"))
+            for attr in self._picklable_attrs + ["current_states"]:
+                self.__setattr__(attr, getattr(obj, attr))
+        else:
+            self.lambda_ = 0
+            self.total_sampling_steps = 0
+            self.lambda_history = [0]
+            self.deltaE_history = []
+            self.weight_history = []
+            self.reporter_history = []
+            self.current_states = []
+            self.logZ = 0
 
     @classmethod
     def generateSimFromStruct(cls, structure, system, integrator, platform=None, properties=None, **kwargs):
@@ -169,12 +181,17 @@ class SequentialSampler:
 
         return simulation
 
-    def run(self, final_decorrelation_step=True, *args, **kwargs):
+    def run(self, save_checkpoint=True, checkpoint_filename="checkpoint.pickle", final_decorrelation_step=True,
+            *args, **kwargs):
         """
         Performs a complete sequential Monte Carlo run until lambda = 1.
 
         Parameters
         ----------
+        save_checkpoint : bool
+            Whether to save a checkpoint file.
+        checkpoint_filename : str
+            Path to the pickle filename to save the checkpoint to. Only valid if save_checkpoint is True.
         final_decorrelation_step : bool
             Whether to decorrelate the final resampled walkers for another number of default_decorrelation_steps.
         args
@@ -182,10 +199,15 @@ class SequentialSampler:
         kwargs
             Keyword arguments to be passed to runSingleIteration().
         """
+        def runAndSave():
+            self.runSingleIteration(*args, **kwargs)
+            if save_checkpoint:
+                self.saveCheckpoint(checkpoint_filename)
+
         while self.lambda_ < 1:
-            self.runSingleIteration(*args, **kwargs)
+            runAndSave()
         if final_decorrelation_step:
-            self.runSingleIteration(*args, **kwargs)
+            runAndSave()
         total_sampling_time = self.total_sampling_steps * self.integrator.getStepSize().in_units_of(_unit.nanosecond)
         _logger.info("Total simulation time was {}".format(total_sampling_time))
 
@@ -289,7 +311,10 @@ class SequentialSampler:
                         self.reporter_history = [x for x in self.reporter_history if x != prev_reporter_filename]
                         self.reporter_history[-1] = prev_reporter_filename
                     else:
-                        _os.remove(curr_reporter_filename)
+                        backup_filename = _os.path.splitext(curr_reporter_filename)[0] + "_backup.dcd"
+                        _os.rename(curr_reporter_filename, backup_filename)
+                        self.reporter_history = [backup_filename if x == curr_reporter_filename else x
+                                                 for x in self.reporter_history]
                     self.simulation.reporters = []
                 self.simulation.reporters.append(_reporters.DCDReporter(curr_reporter_filename,
                                                                         default_decorrelation_steps))
@@ -435,6 +460,29 @@ class SequentialSampler:
         _logger.info("Reporter path: \"{}\"".format(self.reporter_history[-1]))
         _logger.info("Current accumulated logZ: {:.8g}".format(self.logZ))
         _logger.info("Next lambda: {:.8g}".format(self.lambda_))
+
+    def saveCheckpoint(self, filename="checkpoint.pickle", *args, **kwargs):
+        """
+        Performs a complete sequential Monte Carlo run until lambda = 1.
+
+        Parameters
+        ----------
+        filename : str
+            Path to the pickle filename to save the checkpoint to.
+        args
+            Positional arguments to be passed to pickle.dump().
+        kwargs
+            Keyword arguments to be passed to pickle.dump().
+        """
+        new_self = _copy.copy(self)
+        new_self.__dict__ = {x: y for x, y in new_self.__dict__.items() if x in self._picklable_attrs}
+        new_self.current_states = [i for i in range(len(self.current_states))]
+        if _os.path.exists(filename):
+            _os.rename(filename, filename + ".old")
+        _logger.info("Saving checkpoint...")
+        _pickle.dump(new_self, open(filename, "wb"), *args, **kwargs)
+        if _os.path.exists(filename + ".old"):
+            _os.remove(filename + ".old")
 
     @property
     def alchemical_atoms(self):
