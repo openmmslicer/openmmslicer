@@ -35,9 +35,6 @@ class EffectiveSampleSize:
         weights = _np.asarray(weights, dtype=_np.float32)
         return _np.sum(weights) ** 2 / _np.sum(weights ** 2)
 
-    def serialise(self):
-        return self.__dict__
-
 
 class ExpectedSampleSize(EffectiveSampleSize):
     """

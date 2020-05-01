@@ -318,17 +318,13 @@ class SequentialSampler:
             # load instant checkpoint, if applicable
             if load_instant_checkpoint:
                 _logger.info("Loading instant checkpoint...")
-                elapsed_steps, all_transforms, n, sampling_metric_backup, resampling_metric_backup, \
-                 self.reporter_history = _pickle.load(open(load_instant_checkpoint, "rb"))
+                elapsed_steps, all_transforms, n, sampling_metric_backup, self.reporter_history, \
+                  = _pickle.load(open(load_instant_checkpoint, "rb"))
                 extra_conformers = all_transforms[:]
                 assert not ((sampling_metric is None) ^ (sampling_metric_backup is None)), \
                     "Need to provide the same type of sampling metric as the backup"
-                assert not ((resampling_metric is None) ^ (resampling_metric_backup is None)), \
-                    "Need to provide the same type of resampling metric as the backup"
                 if sampling_metric_backup is not None:
                     sampling_metric.__dict__.update(sampling_metric_backup)
-                if resampling_metric_backup is not None:
-                    resampling_metric.__dict__.update(resampling_metric_backup)
                 if not self.lambda_:
                     last_frame = _mdtraj.load(self.reporter_history[-1], top=self.coordinates).n_frames - 1
                     generator = [(i, last_frame) for i in range(n + 1, len(self.current_states))]
@@ -394,9 +390,7 @@ class SequentialSampler:
                 # store instant checkpoint, if applicable
                 if write_instant_checkpoint:
                     sampling_metric_backup = sampling_metric.serialise() if sampling_metric is not None else None
-                    resampling_metric_backup = resampling_metric.serialise() if resampling_metric is not None else None
-                    backups = (elapsed_steps, all_transforms, n, sampling_metric_backup,
-                               resampling_metric_backup, self.reporter_history)
+                    backups = (elapsed_steps, all_transforms, n, sampling_metric_backup, self.reporter_history)
                     _logger.debug("Writing instant checkpoint...")
                     _pickle.dump(backups, open(write_instant_checkpoint, "wb"))
 
