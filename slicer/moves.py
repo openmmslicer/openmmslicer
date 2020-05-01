@@ -1,3 +1,5 @@
+import warnings as _warnings
+
 import numpy as _np
 from scipy.spatial.transform import Rotation as _Rotation
 from simtk import openmm as _openmm
@@ -52,7 +54,7 @@ class Move:
         raise NotImplementedError("This is a virtual method that needs to be overloaded")
 
     @staticmethod
-    def _contextToQuantity(input):
+    def _contextToQuantity(input, return_pbc=False):
         """
         A helper function which converts a number of input formats to standardised objects to be passed to applyMove().
 
@@ -72,11 +74,22 @@ class Move:
         if isinstance(input, _openmm.Context):
             context = input
             input = input.getState(getPositions=True)
+        if return_pbc:
+            if isinstance(input, _openmm.State):
+                pbc = input.getPeriodicBoxVectors(True)
+            else:
+                raise TypeError("Need to pass a valid context or state in order to obtain periodic box vector "
+                                "information")
+
         if isinstance(input, _openmm.State):
             input = input.getPositions(True)
         if not isinstance(input, _openmm.unit.Quantity):
             raise TypeError("Array with units, state or context expected")
-        return context, input
+
+        if return_pbc:
+            return context, input, pbc
+        else:
+            return context, input
 
 
 class MoveList(Move):
@@ -138,9 +151,20 @@ class MoveList(Move):
             The transformed coordinates.
         """
         context, input = self._contextToQuantity(input)
+        failed_moves = []
 
         for move, transformation in zip(self.moves, transformations):
-            input = move.applyMove(input, transformation)
+            try:
+                input = move.applyMove(input, transformation)
+            except:
+                if context is None:
+                    raise TypeError("Need to pass a valid context or state in order to obtain periodic box vector "
+                                    "information")
+                failed_moves += [(move, transformation)]
+
+        for move, transformation in failed_moves:
+            context.setPositions(input)
+            input = move.applyMove(context, transformation)
 
         if context is not None:
             context.setPositions(input)
@@ -186,7 +210,7 @@ class TranslationMove(Move):
     region : str
         Determines the shape of the sampling area. One of "spherical" or "cubic".
     """
-    def __init__(self, structure, translatable_molecule, sampling="systematic", origins=None, radii=1 * _unit.nanometer,
+    def __init__(self, structure, translatable_molecule, sampling="systematic", origins=None, radii=None,
                  region="spherical"):
         if type(translatable_molecule) is str:
             for i, residue in enumerate(structure.residues):
@@ -215,14 +239,26 @@ class TranslationMove(Move):
                 self.origins[i] = 0.1 * (self.masses @ structure.coordinates[self.movable_atoms]) / _np.sum(
                     self.masses) * _unit.nanometer
 
-        if not isinstance(radii, Iterable):
-            self.radii = [radii] * len(self.origins)
+        self.radii = radii
+        self.region = region
+        self.periodic_box_vectors = _np.asarray(structure.box_vectors.value_in_unit(_unit.nanometer))
+
+    @property
+    def radii(self):
+        return self._radii
+
+    @radii.setter
+    def radii(self, val):
+        Iterable = (list, tuple, _np.ndarray)
+        if not isinstance(val, Iterable):
+            if val is None:
+                self._radii = None
+            else:
+                self._radii = [val] * len(self.origins)
         else:
-            self.radii = radii
+            self._radii = val
             if len(self.radii) != len(self.origins):
                 raise ValueError("The number of origins must match the number of radii")
-
-        self.region = region
 
     def generateMoves(self, n_states):
         """
@@ -235,15 +271,22 @@ class TranslationMove(Move):
 
         Returns
         -------
-        translations : openmm.Quantity
-            A numpy array with units containing n_states rows and 3 columns, which specifies the new centres of mass.
+        translations : numpy.ndarray
+            A numpy array with units containing n_states rows and 3 columns, which specifies the new dimensionless
+            centres of mass.
         """
         self.region = self.region.lower()
+        if self.radii is None and self.region != "cubic":
+            _warnings.warn("Only 'cubic' region shape is supported with radii = None. Changing to 'cubic'...")
+            self.region = "cubic"
 
         if self.region == "cubic":
             samples = _np.transpose(_np.asarray([self.sampler(n_states, self.sampling),
                                                  self.sampler(n_states, self.sampling),
                                                  self.sampler(n_states, self.sampling)], dtype=_np.float32))
+            # we return unscaled coordinates and we obtain the box size when we apply the transformation
+            if self.radii is None:
+                return samples
             samples = 2 * samples - 1
         elif self.region == "spherical":
             r = self.sampler(n_states, self.sampling) ** (1 / 3)
@@ -271,7 +314,7 @@ class TranslationMove(Move):
         origins = _np.asarray([self.origins[i].value_in_unit(_unit.nanometer) for i in resamples])
         radii = _np.asarray([[self.radii[i].value_in_unit(_unit.nanometer) for i in resamples]])
 
-        translations = (origins + radii.transpose() * samples) * _unit.nanometer
+        translations = (origins + radii.transpose() * samples) @ _np.linalg.inv(self.periodic_box_vectors)
 
         return translations
 
@@ -292,7 +335,8 @@ class TranslationMove(Move):
         input : openmm.unit.Quantity
             The transformed coordinates.
         """
-        context, input = self._contextToQuantity(input)
+        context, input, pbc = self._contextToQuantity(input, return_pbc=True)
+        translation = (pbc.value_in_unit(_unit.nanometer) @ translation) * _unit.nanometer
 
         coords = input[self.movable_atoms].value_in_unit(_unit.nanometer)
         centre_of_mass = self.masses @ coords / _np.sum(self.masses) * _unit.nanometer
