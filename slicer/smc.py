@@ -6,15 +6,18 @@ import pickle as _pickle
 import random as _random
 import shutil as _shutil
 
+import anytree as _anytree
 import mdtraj as _mdtraj
 import mdtraj.reporters as _reporters
 import numpy as _np
 import openmmtools as _openmmtools
+from pymbar.bar import BAR as _BAR
 from scipy.special import logsumexp as _logsumexp
 import simtk.openmm as _openmm
 import simtk.unit as _unit
 import simtk.openmm.app as _app
 
+from slicer.cluster import DihedralClustering as _DihedralClustering
 import slicer.integrators as _integrators
 from slicer.minimise import GreedyBisectingMinimiser as _GreedyBisectingMinimiser
 import slicer.moves as _moves
@@ -81,7 +84,7 @@ class SequentialSampler:
         A list containing all past lambda values.
     deltaE_history : list
         A list containing all past deltaE values.
-    weight_history : list
+    log_weight_history : list
         A list containing all past weights used for resampling.
     reporter_history : list
         A list containing paths to all past trajectory files.
@@ -90,8 +93,8 @@ class SequentialSampler:
     logZ : float
         The current estimate of the dimensionless free energy difference.
     """
-    _picklable_attrs = ["lambda_", "total_sampling_steps", "lambda_history", "deltaE_history", "weight_history",
-                        "reporter_history", "logZ"]
+    _picklable_attrs = ["lambda_", "log_weights", "total_sampling_steps", "lambda_history", "deltaE_history",
+                        "log_weight_history", "reporter_history", "logZ", "current_tree_nodes", "sample_tree"]
 
     def __init__(self, coordinates, structure, integrator, moves, platform=None, platform_properties=None,
                  npt=True, checkpoint=None, md_config=None, alch_config=None):
@@ -126,16 +129,22 @@ class SequentialSampler:
             _logger.info("Loading checkpoint...")
             obj = _pickle.load(open(checkpoint, "rb"))
             for attr in self._picklable_attrs + ["current_states"]:
-                self.__setattr__(attr, getattr(obj, attr))
+                try:
+                    self.__setattr__(attr, getattr(obj, attr))
+                except AttributeError:
+                    continue
         else:
             self.lambda_ = 0
+            self.log_weights = []
             self.total_sampling_steps = 0
             self.lambda_history = [0]
             self.deltaE_history = []
-            self.weight_history = []
+            self.log_weight_history = []
             self.reporter_history = []
             self.current_states = []
             self.logZ = 0
+            self.sample_tree = _anytree.Node(0)
+            self.current_tree_nodes = []
 
     @classmethod
     def generateSimFromStruct(cls, structure, system, integrator, platform=None, properties=None, **kwargs):
@@ -211,6 +220,7 @@ class SequentialSampler:
                            sampling_metric=_sammetrics.EnergyCorrelation,
                            resampling_method=_resmethods.SystematicResampler,
                            resampling_metric=_resmetrics.WorstCaseSampleSize,
+                           self_consistent_weights=True,
                            target_metric_value=None,
                            target_metric_value_initial=None,
                            target_metric_tol=None,
@@ -220,6 +230,7 @@ class SequentialSampler:
                            default_decorrelation_steps=500,
                            maximum_decorrelation_steps=5000,
                            reporter_filename=None,
+                           n_equil=1,
                            n_walkers=1000,
                            n_conformers_per_walker=100,
                            equilibration_options=None,
@@ -241,6 +252,9 @@ class SequentialSampler:
         resampling_metric : class
             A resampling metric with callable methods as described in slicer.resampling_metrics. This metric is used
             to adaptively determine the optimal next lambda. None removes adaptive resampling.
+        self_consistent_weights : bool
+            Whether to employ delayed resampling so that the backward weights are used to change the forward weights
+            self-consistently
         target_metric_value : float
             The threshold for the resampling metric. None uses the default value given by the class.
         target_metric_value_initial : float
@@ -300,13 +314,22 @@ class SequentialSampler:
 
         # equilibrate if lambda = 0
         if not self.lambda_:
+            n_weights = n_walkers * n_conformers_per_walker
+            self.log_weights = _np.log(_np.asarray([1. / n_weights] * n_weights))
             if equilibration_options is None:
                 equilibration_options = {}
             if reporter_filename is not None and "reporter_filename" not in equilibration_options:
                 equilibration_options["reporter_filename"] = reporter_filename.format("equil")
-            self.equilibrate(**equilibration_options)
-            self.current_states = [self.simulation.context.getState(getPositions=True, getEnergy=True)] * n_walkers
+            self.current_states = []
+            for _ in range(n_equil):
+                old_state = self.simulation.context.getState(getPositions=True)
+                self.equilibrate(**equilibration_options)
+                self.current_states += [self.simulation.context.getState(getPositions=True, getEnergy=True)]
+                self.setState(old_state, self.simulation.context)
+            self.current_states = (self.current_states * (n_walkers // n_equil + 1))[:n_walkers]
 
+        old_dihedrals = []
+        new_dihedrals = []
         # adaptively set decorrelation time, if needed
         if self.lambda_ and sampling_metric:
             sampling_metric.evaluateBefore()
@@ -354,6 +377,8 @@ class SequentialSampler:
                                                                         default_decorrelation_steps))
 
             # sample
+            if elapsed_steps and len(self.lambda_history) >= 3:
+                old_dihedrals += new_dihedrals[-n_walkers:]
             for n, state in generator:
                 prev_reporter_filename = None if not len(self.reporter_history) else self.reporter_history[-1]
                 if type(state) is tuple:
@@ -362,8 +387,12 @@ class SequentialSampler:
                     transform = None
                 self.setState(state, self.simulation.context, reporter_filename=prev_reporter_filename,
                               transform=transform)
+                if not elapsed_steps and len(self.lambda_history) >= 3:
+                    old_dihedrals += [_DihedralClustering.measureDihedrals(self.simulation.context, self._sample_torsions)]
                 self.simulation.context.setVelocitiesToTemperature(self.temperature)
                 self.simulation.step(default_decorrelation_steps)
+                if len(self.lambda_history) >= 3:
+                    new_dihedrals += [_DihedralClustering.measureDihedrals(self.simulation.context, self._sample_torsions)]
 
                 # generate conformers if needed
                 if not self.lambda_:
@@ -423,8 +452,9 @@ class SequentialSampler:
                 self.reporter_history += [curr_reporter_filename]
 
             # return if this is a final decorrelation step
-            if self.lambda_ == 1:
+            if self.lambda_ == 1 and not self_consistent_weights:
                 _logger.info("Sampling at lambda = 1 terminated after {} steps".format(elapsed_steps))
+                _logger.info("Current unbiased log weights: {}".format(self.log_weights))
                 return
 
             # continue decorrelation if metric says so and break otherwise
@@ -496,24 +526,72 @@ class SequentialSampler:
         self._current_deltaEs = self._current_deltaEs[self.lambda_]
         self._current_weights = self._current_weights[self.lambda_]
         self.deltaE_history += [self._current_deltaEs]
-        self.weight_history += [self._current_weights]
         current_deltaEs = self._current_deltaEs[self._current_deltaEs == self._current_deltaEs]
-        self.logZ += _logsumexp(-current_deltaEs) - _np.log(self._current_deltaEs.shape[0])
-
-        # sample new states based on weights
-        if extra_conformers is not None and len(extra_conformers):
-            if dynamically_generate_conformers:
-                new_states = resampling_method.resample([i for i in range(len(extra_conformers))],
-                                                        self._current_weights, n_walkers=n_walkers)[0]
-                self.current_states = [(self.current_states[i // n_conformers_per_walker], extra_conformers[i])
-                                       for i in new_states]
-            else:
-                self.current_states = resampling_method.resample(extra_conformers, self._current_weights,
-                                                                 n_walkers=n_walkers)[0]
+        weights = _np.exp(self.log_weights)[self._current_deltaEs == self._current_deltaEs]
+        weights /= _np.sum(weights)
+        self.logZ += _logsumexp(-current_deltaEs, b=weights)
+        if len(self.log_weights) == n_walkers or len(self.log_weights) == len(extra_conformers):
+            if self.lambda_history[-2]:
+                _logger.info("Current unbiased log weights: {}".format(self.log_weights))
+                if self_consistent_weights:
+                    _logger.info("Current biased log weights: {}".format(
+                        self.deltaE_history[-2] - _logsumexp(self.deltaE_history[-2])))
+            self.log_weights -= self._current_deltaEs
+            self.log_weights -= _logsumexp(self.log_weights)
         else:
-            self.current_states = resampling_method.resample(self.current_states, self._current_weights,
-                                                             n_walkers=n_walkers)[0]
-        _random.shuffle(self.current_states)
+            raise ValueError("The number of weights must match the number of walkers")
+        self.log_weight_history += [self.log_weights]
+
+        # optionally resample new states based on weights
+        if resampling_method is not None:
+            resampling_weights = _np.exp(self.log_weights)
+            resample = True
+            if extra_conformers is not None and len(extra_conformers):
+                # case for lambda == 0
+                indices = [i for i in range(len(extra_conformers))]
+                resampled_states = resampling_method.resample(indices, resampling_weights, n_walkers=n_walkers)[0]
+                _random.shuffle(resampled_states)
+                if dynamically_generate_conformers:
+                    self.current_states = [(self.current_states[i // n_conformers_per_walker], extra_conformers[i])
+                                           for i in resampled_states]
+                else:
+                    self.current_states = [extra_conformers[i] for i in resampled_states]
+            else:
+                # case for lambda != 0
+                if self_consistent_weights:
+                    if self.lambda_history[-3] != 0:
+                        fwd_deltaEs = self.deltaE_history[-2]
+                        backwd_deltaEs = self._current_reduced_potentials - \
+                                         self.calculateStateEnergies(self.lambda_history[-3])
+                        old_dihedrals = _np.asarray(old_dihedrals).transpose()
+                        new_dihedrals = _np.asarray(new_dihedrals).transpose()
+                        clusters = _DihedralClustering.clusterDihedrals(old_dihedrals, new_dihedrals)[-n_walkers:]
+                        resampling_weights = self.selfConsistentWeights(fwd_deltaEs, -backwd_deltaEs, clusters=clusters)
+                    else:
+                        resample = False
+                if resample:
+                    indices = [i for i in range(len(self.current_states))]
+                    resampled_states = resampling_method.resample(indices, resampling_weights, n_walkers=n_walkers)[0]
+                    _random.shuffle(resampled_states)
+                    self.current_states = [self.current_states[i] for i in resampled_states]
+            if resample:
+                resampled_states = _np.asarray(resampled_states)
+                n_resampled = _np.asarray([_np.sum(resampled_states == x) for x in resampled_states])
+                self.deltaE_history[-1] = self.deltaE_history[-1][resampled_states]
+                self.log_weight_history[-1] = self.log_weight_history[-1][resampled_states]
+                self.log_weights = self.log_weights[resampled_states] - _np.log(n_resampled)
+                self.log_weights -= _logsumexp(self.log_weights)
+
+        # update the sample tree
+        if not self.lambda_history[-2]:
+            self.current_tree_nodes = [_anytree.Node(i_new, parent=self.sample_tree)
+                                       for i_new, i_old in enumerate(resampled_states)]
+        else:
+            if resampling_method is not None and resample:
+                self.current_tree_nodes = [_anytree.Node(i_new, parent=self.current_tree_nodes[i_old])
+                                           for i_new, i_old in enumerate(resampled_states)]
+            else:
+                self.current_tree_nodes = [_anytree.Node(i, parent=x) for i, x in enumerate(self.current_tree_nodes)]
 
         _logger.info("Sampling at lambda = {:.8g} terminated after {} steps".format(self.lambda_history[-2],
                                                                                     elapsed_steps))
@@ -552,6 +630,90 @@ class SequentialSampler:
         _pickle.dump(new_self, open(filename, "wb"), *args, **kwargs)
         if _os.path.exists(filename + ".old"):
             _os.remove(filename + ".old")
+
+    def selfConsistentWeights(self, w_F, w_R, w_A=None, clusters=None, tol=1e-12, maximum_iterations=500):
+        w_B = _np.asarray([1 / w_F.shape[0]] * w_F.shape[0])
+        if w_A is None:
+            w_A = _np.copy(w_B)
+
+        w_B = _np.exp(-w_F)
+        w_B /= _np.sum(w_B)
+        w_B = w_A * w_B
+        w_B /= _np.sum(w_B)
+
+        if clusters is None:
+            clusters = _np.zeros(w_F.shape, dtype=_np.int32)
+        assert clusters.shape == w_A.shape == w_F.shape == w_R.shape, "Need to pass arrays with matching dimensions"
+        DeltaF = 0.
+        all_minima = []
+        previous_layer = self.current_tree_nodes
+
+        # convert the tree into an index map
+        while True:
+            all_minima += [_np.asarray([x.name for x in previous_layer])]
+            previous_layer = [x.parent for x in previous_layer]
+            if any(x is None for x in previous_layer):
+                break
+        # we put the initial clusters as the highest level of coarse-graining
+        all_minima[-1] = clusters
+
+        for _ in range(maximum_iterations):
+            # compute free energy using BAR and get all the "constant" weights in advance
+            w_B_old = _np.copy(w_B)
+            new_w_R = w_R - _np.log(w_B_old * _np.shape(w_B_old)[0])
+            DeltaF = _BAR(w_F, new_w_R, DeltaF=DeltaF, compute_uncertainty=False)
+            w_BAR_A = 1 / (1 + _np.exp(w_F - DeltaF))
+            w_BAR_B = 1 / (1 + _np.exp(-w_R + DeltaF))
+
+            previous_minima = all_minima[-1]
+            previous_unique_minima = _np.unique(previous_minima)
+            for minima_layer in all_minima[-2::-1]:
+                for previous_unique_minimum in previous_unique_minima:
+                    previous_unique_indices = _np.where(previous_minima == previous_unique_minimum)
+
+                    current_minima = minima_layer[previous_unique_indices]
+                    current_unique_minima = _np.unique(current_minima)
+
+                    if current_unique_minima.shape[0] == 1:
+                        continue
+
+                    # get w_A and w_B for the previous minimum
+                    sub_w_A = w_A[previous_unique_indices]
+                    sub_w_A /= _np.sum(sub_w_A)
+                    sub_w_B = w_B_old[previous_unique_indices]
+                    sub_w_B /= _np.sum(sub_w_B)
+
+                    # get the normalised w_B for the current subminima
+                    sub_sub_w_B = [sub_w_B[_np.where(current_minima == x)] for x in current_unique_minima]
+                    for i in range(len(sub_sub_w_B)):
+                        sub_sub_w_B[i] /= _np.sum(sub_sub_w_B[i])
+
+                    # cache the two sums
+                    sub_w_BAR_A = _np.asarray([_np.dot(w_BAR_A[previous_unique_indices][_np.where(current_minima == x)],
+                                                       sub_w_A[_np.where(current_minima == x)])
+                                               for x in current_unique_minima]).flatten()
+                    sub_w_BAR_B = _np.asarray([_np.dot(w_BAR_B[previous_unique_indices][_np.where(current_minima == x)],
+                                                       sub_sub_w_B[i])
+                                               for i, x in enumerate(current_unique_minima)]).flatten()
+
+                    # iteratively determine the coarse-grained weights for the current subminima
+                    coarse_weights = _np.asarray([1 / current_unique_minima.shape[0]] * current_unique_minima.shape[0])
+                    for _ in range(maximum_iterations):
+                        coarse_weights_old = _np.copy(coarse_weights)
+                        coarse_weights = sub_w_BAR_A + sub_w_BAR_B * coarse_weights_old
+                        coarse_weights /= _np.sum(coarse_weights)
+                        if _np.max(_np.abs(coarse_weights - coarse_weights_old)) < tol:
+                            break
+                    coarse_weights *= _np.sum(w_B[previous_unique_indices])
+
+                    # replace the old previous minimum weights with the new current minima weights
+                    for i, current_unique_minimum in enumerate(current_unique_minima):
+                        w_B[previous_unique_indices][_np.where(current_minima == current_unique_minimum)] = sub_sub_w_B[i] * coarse_weights[i]
+                previous_minima = minima_layer
+                previous_unique_minima = _np.unique(previous_minima)
+            if _np.max(_np.abs(w_B_old - w_B)) < tol:
+                break
+        return w_B
 
     @property
     def alchemical_atoms(self):
@@ -686,6 +848,15 @@ class SequentialSampler:
         all_rotatable_bonds = {frozenset(x) for x in self._rotatable_bonds}
         self._alchemical_dihedral_indices = [i for i, d in enumerate(self.structure.dihedrals) if not d.improper and
                                              {d.atom2.idx, d.atom3.idx} in all_rotatable_bonds]
+        self._sample_torsions = []
+        remaining_bonds = all_rotatable_bonds.copy()
+        for d in self.structure.dihedrals:
+            a1, a2, a3, a4 = d.atom1.idx, d.atom2.idx, d.atom3.idx, d.atom4.idx
+            if frozenset([a2, a3]) in remaining_bonds:
+                self._sample_torsions += [(a1, a2, a3, a4)]
+                remaining_bonds -= {frozenset([a2, a3])}
+            if remaining_bonds == set():
+                break
 
     def equilibrate(self,
                     equilibration_steps=100000,
