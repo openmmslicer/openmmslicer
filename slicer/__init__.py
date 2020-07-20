@@ -1,3 +1,4 @@
+from . import cluster
 from . import integrators
 from . import moves
 from . import resampling_metrics
