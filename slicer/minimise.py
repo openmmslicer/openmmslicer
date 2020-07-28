@@ -6,7 +6,7 @@ class BisectingMinimiser:
     A bisection algorithm specifically tailored for minimising/maximising the next lambda value over a threshold.
     """
     @classmethod
-    def minimise(self, func, threshold_y, current_x, desired_x, minimum_x=None, initial_guess_x=None, current_y=None,
+    def minimise(cls, func, threshold_y, current_x, desired_x, minimum_x=None, initial_guess_x=None, current_y=None,
                  maxfun=100, tol=1e-8, *args, **kwargs):
         """
         Finds the maximum lambda value within a threshold using bisection
@@ -47,33 +47,21 @@ class BisectingMinimiser:
         if initial_guess_x is not None:
             assert not (initial_guess_x <= current_x <= desired_x) and not (initial_guess_x >= current_x >= desired_x)
         if minimum_x is not None:
-            assert not (minimum_x <= current_x <= desired_x) and not (minimum_x >= current_x >= desired_x)
+            assert not (minimum_x < current_x <= desired_x) and not (minimum_x > current_x >= desired_x)
 
-        x_0 = current_x
-        y_0 = current_y if current_y is not None else func(x_0, *args, **kwargs)
-        x_1 = desired_x
-        y_1 = func(x_1, *args, **kwargs)
+        current_y = current_y if current_y is not None else func(current_x, *args, **kwargs)
+        sortfunc = max if desired_x > current_x else min
+        x_0 = current_x if minimum_x is None else -sortfunc(-minimum_x, -desired_x)
 
-        # edge cases
-        if y_0 == threshold_y:
+        if current_y == threshold_y or x_0 == desired_x:
             return x_0
 
-        sgn = _sign(y_0 - threshold_y)
-        if _sign(y_1 - threshold_y) == sgn:
-            return x_1
-
-        sortfunc = max if desired_x > current_x else min
-        minimum_x = x_0 if minimum_x is None else -sortfunc(-minimum_x, -desired_x)
-        x_within_threshold = [x_0, minimum_x]
+        sgn = _sign(current_y - threshold_y)
+        x_curr = desired_x if initial_guess_x is None else -sortfunc(-initial_guess_x, -desired_x)
+        x_within_threshold = [x_0]
         delta_x = None if initial_guess_x is None else initial_guess_x - current_x
 
         for i in range(maxfun):
-            if delta_x is None:
-                proposal = 0.5 * (x_0 + x_1)
-            else:
-                proposal = x_0 + delta_x
-                delta_x *= 2 ** (i + 1)
-            x_curr = sortfunc(minimum_x, proposal)
             y_curr = func(x_curr, *args, **kwargs)
 
             if abs(y_curr - threshold_y) <= abs(tol * threshold_y):
@@ -81,11 +69,17 @@ class BisectingMinimiser:
 
             if _sign(y_curr - threshold_y) == sgn:
                 x_0 = x_curr
+                if x_0 == desired_x:
+                    return x_0
                 x_within_threshold += [x_curr]
             else:
-                if sortfunc(x_curr, minimum_x) == minimum_x:
-                    return minimum_x
                 x_1 = x_curr
                 delta_x = None
+
+            if delta_x is None:
+                x_curr = 0.5 * (x_0 + x_1)
+            else:
+                delta_x *= 2 ** (i + 1)
+                x_curr = -sortfunc(-x_0 - delta_x, -desired_x)
 
         return sortfunc(x_within_threshold)
