@@ -162,13 +162,11 @@ class GenericSMCSampler:
         return reporter[0]
 
     @property
-    def state_data_reporter(self):
-        reporter = [x for x in self.reporters if isinstance(x, _reporters.MultistateStateDataReporter)]
-        if not len(reporter):
+    def state_data_reporters(self):
+        reporters = [x for x in self.reporters if isinstance(x, _reporters.MultistateStateDataReporter)]
+        if not len(reporters):
             return None
-        if len(reporter) > 1:
-            _warnings.warn("Only the first slicer.reporters.MultistateStateDataReporter will be used for reporting")
-        return reporter[0]
+        return reporters
 
     @property
     def current_trajectory_filename(self):
@@ -405,8 +403,8 @@ class GenericSMCSampler:
             append = True if load_checkpoint else False
             self.simulation.reporters.append(self.trajectory_reporter.generateReporter(
                 round(self.lambda_, 8), default_decorrelation_steps, append=append))
-        if self.state_data_reporter is not None:
-            self.simulation.reporters.append(self.state_data_reporter)
+        if self.state_data_reporters is not None:
+            self.simulation.reporters += self.state_data_reporters
 
         # load checkpoint, if applicable
         if load_checkpoint is not None:
@@ -422,9 +420,10 @@ class GenericSMCSampler:
             generator = enumerate(zip(self.states, self.transforms))
 
         for n, (state, transform) in generator:
-            # update the state data reporter, if there is one
-            if self.state_data_reporter is not None:
-                self.state_data_reporter.update(self, n)
+            # update the state data reporters, if applicable
+            if self.state_data_reporters is not None:
+                for r in self.state_data_reporters:
+                    r.update(self, n)
             # sample
             self.setState(state, self.simulation.context, reporter_filename=self.previous_trajectory_filename,
                           transform=transform)
