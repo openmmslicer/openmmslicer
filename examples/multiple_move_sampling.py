@@ -1,7 +1,7 @@
 from slicer.integrators import AlchemicalLangevinIntegrator
 from slicer.moves import TranslationMove, RotationMove, DihedralMove
 from slicer.resampling_metrics import WorstCaseSampleSize
-from slicer.smc import SequentialSampler
+from slicer.smc import GenericSMCSampler
 
 import logging
 logging.basicConfig(level=logging.INFO)
@@ -33,7 +33,7 @@ integrator = AlchemicalLangevinIntegrator(temperature=298.*unit.kelvin,
                                           collision_rate=1./unit.picoseconds,
                                           timestep=2.*unit.femtoseconds)
 platform = "CUDA"
-ensemble = SequentialSampler(gro, structure, integrator, moves=moves, platform=platform, md_config=md_config)
+ensemble = GenericSMCSampler(gro, structure, integrator, moves=moves, platform=platform, md_config=md_config)
 ensemble.simulation.minimizeEnergy()
 
 # run simulation
