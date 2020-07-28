@@ -18,7 +18,7 @@ import simtk.unit as _unit
 import slicer.integrators as _integrators
 from slicer.minimise import BisectingMinimiser as _BisectingMinimiser
 import slicer.moves as _moves
-from slicer.reporters import MultistateDCDReporter as _MultistateDCDReporter
+import slicer.reporters as _reporters
 import slicer.resampling_metrics as _resmetrics
 import slicer.resampling_methods as _resmethods
 import slicer.sampling_metrics as _sammetrics
@@ -154,11 +154,20 @@ class GenericSMCSampler:
 
     @property
     def trajectory_reporter(self):
-        reporter = [x for x in self.reporters if isinstance(x, _MultistateDCDReporter)]
+        reporter = [x for x in self.reporters if isinstance(x, _reporters.MultistateDCDReporter)]
         if not len(reporter):
             return None
         if len(reporter) > 1:
             _warnings.warn("Only the first slicer.reporters.MultistateDCDReporter will be used for state loading")
+        return reporter[0]
+
+    @property
+    def state_data_reporter(self):
+        reporter = [x for x in self.reporters if isinstance(x, _reporters.MultistateStateDataReporter)]
+        if not len(reporter):
+            return None
+        if len(reporter) > 1:
+            _warnings.warn("Only the first slicer.reporters.MultistateStateDataReporter will be used for reporting")
         return reporter[0]
 
     @property
@@ -396,6 +405,8 @@ class GenericSMCSampler:
             append = True if load_checkpoint else False
             self.simulation.reporters.append(self.trajectory_reporter.generateReporter(
                 round(self.lambda_, 8), default_decorrelation_steps, append=append))
+        if self.state_data_reporter is not None:
+            self.simulation.reporters.append(self.state_data_reporter)
 
         # load checkpoint, if applicable
         if load_checkpoint is not None:
@@ -411,6 +422,9 @@ class GenericSMCSampler:
             generator = enumerate(zip(self.states, self.transforms))
 
         for n, (state, transform) in generator:
+            # update the state data reporter, if there is one
+            if self.state_data_reporter is not None:
+                self.state_data_reporter.update(self, n)
             # sample
             self.setState(state, self.simulation.context, reporter_filename=self.previous_trajectory_filename,
                           transform=transform)
@@ -434,8 +448,8 @@ class GenericSMCSampler:
                 self.writeCheckpoint(data, filename=write_checkpoint, update=True)
 
         # reset the reporter
+        self.simulation.reporters = [x for x in self.simulation.reporters if x not in self.reporters]
         if self.trajectory_reporter:
-            del self.simulation.reporters[-1]
             self.trajectory_reporter.prune()
 
     def generateTransforms(self,

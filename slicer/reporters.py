@@ -1,7 +1,9 @@
 import itertools as _it
 import os as _os
 
+import numpy as _np
 from simtk.openmm.app.dcdreporter import DCDReporter as _DCDReporter
+from simtk.openmm.app.statedatareporter import StateDataReporter as _StateDataReporter
 
 
 class MultistateDCDReporter:
@@ -44,3 +46,39 @@ class MultistateDCDReporter:
         self.current_reporter = None
         self.filename_history = []
         self.prunable_filenames = []
+
+
+class MultistateStateDataReporter(_StateDataReporter):
+    def __init__(self, *args, current_lambda=False, logZ=False, walker_ids=False, weights=False, log_weights=False,
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        self._smc_extras = {
+            "Lambda": [current_lambda, None],
+            "LogZ": [logZ, None],
+            "Walker ID": [walker_ids, None],
+            "Weight": [weights, None],
+            "Log weight": [log_weights, None]
+        }
+
+    def update(self, smc_sampler, current_walker_id):
+        self._smc_extras["Lambda"][1] = smc_sampler.lambda_
+        self._smc_extras["LogZ"][1] = smc_sampler.logZ
+        self._smc_extras["Walker ID"][1] = current_walker_id
+        self._smc_extras["Weight"][1] = _np.exp(smc_sampler.log_weights[current_walker_id])
+        self._smc_extras["Log weight"][1] = smc_sampler.log_weights[current_walker_id]
+
+    def _constructHeaders(self):
+        headers = []
+        for attr in ["Lambda", "LogZ", "Walker ID", "Weight", "Log weight"]:
+            if self._smc_extras[attr][0]:
+                headers.append(attr)
+        headers += super()._constructHeaders()
+        return headers
+
+    def _constructReportValues(self, simulation, state):
+        values = []
+        for attr in ["Lambda", "LogZ", "Walker ID", "Weight", "Log weight"]:
+            if self._smc_extras[attr][0]:
+                values.append(self._smc_extras[attr][1])
+        values += super()._constructReportValues(simulation, state)
+        return values
