@@ -9,19 +9,19 @@ class MultistateDCDReporter:
         self.filebase = _os.path.abspath(filebase)
         self.reset()
 
-    def generateReporter(self, lambda_, append=False, *args, **kwargs):
+    def generateReporter(self, lambda_, *args, append=False, **kwargs):
         self.current_filename = self.filebase.format(lambda_)
 
         if not append and _os.path.exists(self.current_filename):
             prev_filebase, ext = _os.path.splitext(self.current_filename)
             if len(self.filename_history) and self.filename_history[-1] == self.current_filename:
-                suffix = "prev"
+                suffix = "_prev"
                 prev_filename = prev_filebase + suffix + ext
                 self.prunable_filenames += [prev_filename]
                 self.filename_history = [prev_filename if x == self.current_filename else x
                                          for x in self.filename_history]
             else:
-                suffix = "backup"
+                suffix = "_backup"
                 prev_filename = prev_filebase + suffix + ext
             _os.rename(self.current_filename, prev_filename)
 
@@ -37,7 +37,7 @@ class MultistateDCDReporter:
             except FileNotFoundError:
                 pass
         self.prunable_filenames = []
-        self.filename_history = [x for x in _it.groupby(self.filename_history)]
+        self.filename_history = [x for x, _ in _it.groupby(self.filename_history)]
 
     def reset(self):
         self.current_filename = None

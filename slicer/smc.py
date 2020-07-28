@@ -1,7 +1,10 @@
+from collections import Counter as _Counter
 import copy as _copy
+import inspect as _inspect
 import logging as _logging
 import os as _os
 import pickle as _pickle
+import random as _random
 import warnings as _warnings
 
 import mdtraj as _mdtraj
@@ -91,7 +94,7 @@ class GenericSMCSampler:
         The current estimate of the dimensionless free energy difference.
     """
     _picklable_attrs = ["total_sampling_steps", "lambda_", "lambda_history", "log_weights", "log_weight_history",
-                        "deltaE_history", "reporters", "logZ", "logZ_history", "transforms"]
+                        "deltaE_history", "reporters", "logZ", "logZ_history", "transforms", "initialised"]
 
     def __init__(self, coordinates, structure, integrator, moves, platform=None, platform_properties=None,
                  npt=True, checkpoint=None, md_config=None, alch_config=None):
@@ -131,6 +134,7 @@ class GenericSMCSampler:
                 except AttributeError:
                     continue
         else:
+            self.initialised = False
             self.total_sampling_steps = 0
             self.states = []
             self.transforms = []
@@ -212,7 +216,7 @@ class GenericSMCSampler:
 
     def writeCheckpoint(self, data, filename="checkpoint.pickle", update=True, *args, **kwargs):
         backups = {}
-        if update == True:
+        if update:
             try:
                 backups = _pickle.load(open(filename, "rb"))
             except (FileNotFoundError, _pickle.UnpicklingError):
@@ -274,10 +278,13 @@ class GenericSMCSampler:
         context : openmm.Context
             The context to which the state needs to be applied.
         reporter_filename : str
-            The path to the trajectory file containing the relevant frame, if applicable.
+            The path to the trajectory file containing the relevant frame, if applicable. Default is
+            current_trajectory_filename.
         transform :
             Optionally generate a transform dynamically from a format, specific to the underlying moves.
         """
+        if reporter_filename is None:
+            reporter_filename = self.current_trajectory_filename
         if type(state) is int:
             frame = _mdtraj.load_frame(reporter_filename, state, self.coordinates)
             positions = frame.xyz[0]
@@ -363,6 +370,16 @@ class GenericSMCSampler:
             del self.simulation.reporters[-1]
             self.trajectory_reporter.prune()
 
+    def initialise(self, n_walkers):
+        if not self.initialised:
+            if not len(self.states):
+                self.states = [self.simulation.context.getState(getPositions=True, getEnergy=True)] * n_walkers
+            elif len(self.states) < n_walkers:
+                self.states = self.states * (n_walkers // len(self.states) + 1)[:n_walkers]
+            self.transforms = [None] * n_walkers
+            self.log_weights = _np.log([1 / n_walkers] * n_walkers)
+        self.initialised = True
+
     def sample(self,
                default_decorrelation_steps=500,
                keep_walkers_in_memory=False,
@@ -377,8 +394,8 @@ class GenericSMCSampler:
         # set up a reporter, if applicable
         if self.trajectory_reporter is not None:
             append = True if load_checkpoint else False
-            self.simulation.reporters.append(self.trajectory_reporter.generateReporter(round(self.lambda_, 8),
-                                                                                       append=append))
+            self.simulation.reporters.append(self.trajectory_reporter.generateReporter(
+                round(self.lambda_, 8), default_decorrelation_steps, append=append))
 
         # load checkpoint, if applicable
         if load_checkpoint is not None:
@@ -389,13 +406,12 @@ class GenericSMCSampler:
             if all(attr in data.keys() for attr in attrs):
                 for attr in attrs:
                     exec("{0} = data.{0}".format(attr))
-            generator = ((i, i) for i in range(n + 1, len(self.states)))
+            generator = ((i, (i, self.transforms[i])) for i in range(n + 1, len(self.states)))
         else:
-            generator = enumerate(self.states)
+            generator = enumerate(zip(self.states, self.transforms))
 
-        for n, state in generator:
+        for n, (state, transform) in generator:
             # sample
-            transform = None if self.transforms is None or self.transforms[n] is None else self.transforms[n]
             self.setState(state, self.simulation.context, reporter_filename=self.previous_trajectory_filename,
                           transform=transform)
             self.simulation.context.setVelocitiesToTemperature(self.temperature)
@@ -432,7 +448,7 @@ class GenericSMCSampler:
             new_transforms = []
 
             for n, state in enumerate(self.states):
-                self.setState(state, self.simulation.context, reporter_filename=self.current_trajectory_filename)
+                self.setState(state, self.simulation.context)
                 transforms = self.moves.generateMoves(n_transforms_per_walker)
 
                 if not dynamically_generate_transforms:
@@ -443,8 +459,12 @@ class GenericSMCSampler:
                         self.simulation.context.setState(state)
                         new_transforms += [None]
                 else:
+                    new_states += [state]
                     new_transforms += [transforms]
 
+            self.log_weights = self.log_weights[
+                sum([[i] * n_transforms_per_walker for i in range(len(self.states))], [])]
+            self.log_weights -= _logsumexp(self.log_weights)
             self.states = new_states
             self.transforms = new_transforms
         else:
@@ -469,7 +489,7 @@ class GenericSMCSampler:
 
         # this is the function we are going to minimise
         def evaluateWeights(lambda_):
-            new_lambda = float(min(1., lambda_))
+            new_lambda = float(max(min(1., lambda_), 0))
             self._new_reduced_potentials = self.calculateStateEnergies(new_lambda, transforms=self.transforms)
             self._current_deltaEs[new_lambda] = self._new_reduced_potentials - self._current_reduced_potentials
             self._current_weights[new_lambda] = _np.exp(
@@ -488,6 +508,9 @@ class GenericSMCSampler:
             default_dlambda = sgn * abs(default_dlambda)
         if minimum_dlambda is not None:
             minimum_dlambda = sgn * abs(minimum_dlambda)
+            minimum_lambda = self.lambda_ + minimum_dlambda
+        else:
+            minimum_lambda = self.lambda_
         if maximum_dlambda is not None:
             target_lambda = self.lambda_ + sgn * abs(maximum_dlambda)
 
@@ -499,17 +522,17 @@ class GenericSMCSampler:
                 target_metric_tol = resampling_metric.defaultTol()
 
             # minimise and set optimal lambda value adaptively if possible
-            length = len(self.states) if self.transforms is None else sum(len(x) for x in self.transforms)
+            length = sum(1 if x is None else len(x) for x in self.transforms)
             current_y = resampling_metric.evaluate([1 / length] * length)
             initial_guess_x = None if default_dlambda is None else self.lambda_ + default_dlambda
             next_lambda_ = _BisectingMinimiser.minimise(evaluateWeights, target_metric_value, self.lambda_,
-                                                        target_lambda, minimum_x=self.lambda_ + minimum_dlambda,
+                                                        target_lambda, minimum_x=minimum_lambda,
                                                         initial_guess_x=initial_guess_x, current_y=current_y,
                                                         tol=target_metric_tol, maxfun=maximum_metric_evaluations)
             _logger.debug("Tentative next lambda: {:.8g}".format(next_lambda_))
         else:
             # else use default_dlambda
-            next_lambda_ = min(1., self.lambda_ + default_dlambda)
+            next_lambda_ = max(0, min(1., self.lambda_ + default_dlambda))
             evaluateWeights(next_lambda_)
 
         if change_lambda:
@@ -519,20 +542,21 @@ class GenericSMCSampler:
         return next_lambda_
 
     def change_lambda(self, next_lambda):
-        self.lambda_ = next_lambda
-        self.lambda_history += [self.lambda_]
-        self.simulation.integrator.setGlobalVariableByName("lambda", self.lambda_)
-        current_deltaEs = self._current_deltaEs[self.lambda_]
-        self._current_deltaEs, self._current_weights = {}, {}
-        self.deltaE_history += [current_deltaEs]
-        lengths = [len(x) if x is not None else 1 for x in self.transforms]
-        log_weights_old = self.log_weights[sum([[i] * x for i, x in enumerate(lengths)], [])]
-        weights_old = _np.exp(log_weights_old - _logsumexp(log_weights_old))
-        self.logZ += _logsumexp(-current_deltaEs, b=weights_old)
-        self.logZ_history += [self.logZ]
-        self.log_weights = log_weights_old - current_deltaEs
-        self.log_weights -= _logsumexp(self.log_weights)
-        self.log_weight_history += [self.log_weights]
+        if next_lambda is not None:
+            self.lambda_ = next_lambda
+            self.lambda_history += [self.lambda_]
+            self.simulation.integrator.setGlobalVariableByName("lambda", self.lambda_)
+            current_deltaEs = self._current_deltaEs[self.lambda_]
+            self._current_deltaEs, self._current_weights = {}, {}
+            self.deltaE_history += [current_deltaEs]
+            lengths = [len(x) if x is not None else 1 for x in self.transforms]
+            log_weights_old = self.log_weights[sum([[i] * x for i, x in enumerate(lengths)], [])]
+            weights_old = _np.exp(log_weights_old - _logsumexp(log_weights_old))
+            self.logZ += _logsumexp(-current_deltaEs, b=weights_old)
+            self.logZ_history += [self.logZ]
+            self.log_weights = log_weights_old - current_deltaEs
+            self.log_weights -= _logsumexp(self.log_weights)
+            self.log_weight_history += [self.log_weights]
 
     def resample(self,
                  n_walkers=1000,
@@ -551,26 +575,25 @@ class GenericSMCSampler:
             if transforms is None:
                 transforms = self.transforms
 
-            if self.transforms is None:
-                indices = [i for i in range(len(self.states))]
-            else:
-                indices = []
-                for i in range(len(self.states)):
-                    if self.transforms[i] is None:
-                        indices += [(i, None)]
-                    else:
-                        indices += [(i, j) for j in range(len(self.transforms[i]))]
+            indices = []
+            for i in range(len(self.states)):
+                if self.transforms[i] is None:
+                    indices += [(i, None)]
+                else:
+                    indices += [(i, j) for j in range(len(self.transforms[i]))]
 
             # resample
             resampled_states = resampling_method.resample(indices, weights, n_walkers=n_walkers)[0]
+            _random.shuffle(resampled_states)
             states = [states[x[0]] for x in resampled_states]
-            transforms = [None if x[1] is None else transforms[x[1]] for x in resampled_states]
+            transforms = [None if x[1] is None else transforms[x[0]][x[1]] for x in resampled_states]
             weights = weights[[indices.index(x) for x in resampled_states]]
 
             # update the weights
             log_weights = _np.log(weights)
             if exact_weights:
-                n_resampled = _np.asarray([_np.sum(resampled_states == x) for x in resampled_states])
+                counts = _Counter(resampled_states)
+                n_resampled = [counts[x] for x in resampled_states]
                 log_weights -= _np.log(n_resampled)
             else:
                 log_weights -= log_weights
@@ -599,7 +622,7 @@ class GenericSMCSampler:
                            default_decorrelation_steps=500,
                            maximum_decorrelation_steps=5000,
                            n_walkers=1000,
-                           generate_transforms=True,
+                           generate_transforms=None,
                            n_transforms_per_walker=100,
                            equilibration_options=None,
                            dynamically_generate_transforms=True,
@@ -665,6 +688,9 @@ class GenericSMCSampler:
             typically requires that the GenericSMCSampler was instantiated with the same checkpoint file. None
             means that no checkpoint will be read.
         """
+        if _inspect.isclass(sampling_metric):
+            sampling_metric = sampling_metric(self)
+
         reweight_kwargs = dict(
             resampling_metric=resampling_metric,
             target_metric_value=target_metric_value,
@@ -675,7 +701,10 @@ class GenericSMCSampler:
             maximum_dlambda=maximum_dlambda,
             target_lambda=target_lambda
         )
+        self.initialise(n_walkers)
 
+        if self.lambda_ and sampling_metric:
+            sampling_metric.evaluateBefore()
         elapsed_steps = 0
         while True:
             # load checkpoint, if applicable
@@ -712,6 +741,10 @@ class GenericSMCSampler:
                 dynamically_generate_transforms=dynamically_generate_transforms
             )
 
+            # return if final decorrelation
+            if self.lambda_ == target_lambda:
+                return
+
             # evaluate sampling metric
             next_lambda = None
             if self.lambda_ and sampling_metric:
@@ -728,7 +761,7 @@ class GenericSMCSampler:
                 sampling_metric.reset()
 
             # reweight if needed and change lambda
-            if next_lambda is not None:
+            if next_lambda is None:
                 self.reweight(**reweight_kwargs)
             else:
                 self.change_lambda(next_lambda)
@@ -742,8 +775,8 @@ class GenericSMCSampler:
         )
 
         # dump info to logger
-        _logger.info("Sampling at lambda = {:.8g} terminated after {} steps".format(self.lambda_history[-2],
-                                                                                    elapsed_steps))
+        _logger.info("Sampling at lambda = {:.8g} terminated after {} steps per walker".format(self.lambda_history[-2],
+                                                                                               elapsed_steps))
         _logger.info("Trajectory path: \"{}\"".format(self.current_trajectory_filename))
         _logger.info("Current accumulated logZ: {:.8g}".format(self.logZ))
         _logger.info("Next lambda: {:.8g}".format(self.lambda_))
