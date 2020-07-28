@@ -26,6 +26,8 @@ class MultistateDCDReporter:
                 suffix = "_backup"
                 prev_filename = prev_filebase + suffix + ext
             _os.rename(self.current_filename, prev_filename)
+        elif not _os.path.exists(self.current_filename):
+            append = False
 
         self.current_reporter = _DCDReporter(self.current_filename, *args, append=append, **kwargs)
         self.filename_history += [self.current_filename]

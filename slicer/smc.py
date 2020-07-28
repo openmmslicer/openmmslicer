@@ -335,7 +335,8 @@ class GenericSMCSampler:
         # set up a reporter, if applicable
         if self.trajectory_reporter is not None:
             output_interval = min(output_interval, equilibration_steps)
-            self.simulation.reporters.append(self.trajectory_reporter.generateReporter("equil", output_interval))
+            self.simulation.reporters.append(self.trajectory_reporter.generateReporter("equil", output_interval,
+                                                                                       append=True))
 
         # add restraints, if applicable
         force = _openmm.CustomExternalForce("k*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
@@ -344,7 +345,7 @@ class GenericSMCSampler:
         force.addPerParticleParameter("y0")
         force.addPerParticleParameter("z0")
 
-        atoms = {}
+        atoms = set()
         if restrain_backbone:
             atoms |= {i for i, a in enumerate(self.structure.atoms) if a.name in ('CA', 'C', 'N')}
         if restrain_resnames:
@@ -382,7 +383,7 @@ class GenericSMCSampler:
             if not len(self.states):
                 self.states = [self.simulation.context.getState(getPositions=True, getEnergy=True)] * n_walkers
             elif len(self.states) < n_walkers:
-                self.states = self.states * (n_walkers // len(self.states) + 1)[:n_walkers]
+                self.states = (self.states * (n_walkers // len(self.states) + 1))[:n_walkers]
             self.transforms = [None] * n_walkers
             self.log_weights = _np.log([1 / n_walkers] * n_walkers)
         self.initialised = True
@@ -794,12 +795,37 @@ class GenericSMCSampler:
         _logger.info("Current accumulated logZ: {:.8g}".format(self.logZ))
         _logger.info("Next lambda: {:.8g}".format(self.lambda_))
 
-    def run(self, final_decorrelation_step=True, *args, **kwargs):
+    def run(self,
+            *args,
+            n_equilibrations=1,
+            equilibration_steps=100000,
+            restrain_backbone=True,
+            restrain_resnames=None,
+            restrain_alchemical_atoms=False,
+            force_constant=5.0 * _unit.kilocalories_per_mole / _unit.angstroms ** 2,
+            output_interval=100000,
+            final_decorrelation_step=True,
+            **kwargs):
         """
         Performs a complete sequential Monte Carlo run until lambda = 1.
 
         Parameters
         ----------
+        n_equilibrations : int
+            The number of equilibrations.
+        equilibration_steps : int
+            The number of equilibration steps per equilibration.
+        restrain_backbone : bool
+            Whether to restrain all atoms with the following names: 'CA', 'C', 'N'.
+        restrain_resnames : list
+            A list of residue names to restrain. Default is: ["UNL", "LIG"]
+        restrain_alchemical_atoms : bool, None
+            True restrains all alchemical atoms, False removes restraints from all alchemical atoms and None has no
+            effect on the restraints.
+        force_constant : openmm.unit.Quantity
+            The magnitude of the restraint force constant.
+        output_interval : int
+            How often to output to a trajectory file.
         final_decorrelation_step : bool
             Whether to decorrelate the final resampled walkers for another number of default_decorrelation_steps.
         args
@@ -811,6 +837,20 @@ class GenericSMCSampler:
             self.runSingleIteration(*args, **kwargs)
             if "load_checkpoint" in kwargs.keys():
                 kwargs.pop("load_checkpoint")
+
+        if not self.lambda_:
+            for _ in range(n_equilibrations):
+                old_state = self.simulation.context.getState(getPositions=True)
+                self.equilibrate(equilibration_steps=equilibration_steps,
+                                 restrain_backbone=restrain_backbone,
+                                 restrain_resnames=restrain_resnames,
+                                 restrain_alchemical_atoms=restrain_alchemical_atoms,
+                                 force_constant=force_constant,
+                                 output_interval=output_interval)
+                self.states += [self.simulation.context.getState(getPositions=True, getEnergy=True)]
+                self.setState(old_state, self.simulation.context)
+            self.transforms = [None] * n_equilibrations
+            self.log_weights = _np.log([1 / n_equilibrations] * n_equilibrations)
 
         while self.lambda_ < 1:
             runOnce()
