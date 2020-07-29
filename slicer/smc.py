@@ -225,7 +225,9 @@ class GenericSMCSampler:
 
             # update log_weights
             lengths = [len(x) if x is not None else 1 for x in self.transforms]
-            log_weights_old = self.log_weights[sum([[i] * x for i, x in enumerate(lengths)], [])]
+            indices = sum([[i] * x for i, x in enumerate(lengths)], [])
+            log_weights_old = self.log_weights[indices]
+            log_weights_old[indices] -= _np.log([lengths[i] for i in indices])
             weights_old = _np.exp(log_weights_old - _logsumexp(log_weights_old))
             self.log_weights = log_weights_old - current_deltaEs
             self.log_weights -= _logsumexp(self.log_weights)
