@@ -210,18 +210,18 @@ class GenericSMCSampler:
     @lambda_.setter
     def lambda_(self, val):
         if val is not None and val != self._lambda_:
-            # update lambdas
-            self._lambda_ = val
-            self.lambda_history += [self._lambda_]
-            self._update_alchemical_lambdas(self._lambda_)
-
             # update deltaEs
-            if self._lambda_ in self._current_deltaEs.keys():
-                current_deltaEs = self._current_deltaEs[self._lambda_]
+            if isinstance(self._current_deltaEs, dict) and val in self._current_deltaEs.keys():
+                current_deltaEs = self._current_deltaEs[val]
             else:
                 current_deltaEs = self.calculateDeltaEs(val)
                 self._current_deltaEs = current_deltaEs
             self.deltaE_history += [current_deltaEs]
+
+            # update lambdas
+            self._lambda_ = val
+            self.lambda_history += [self._lambda_]
+            self._update_alchemical_lambdas(self._lambda_)
 
             # update log_weights
             lengths = [len(x) if x is not None else 1 for x in self.transforms]
