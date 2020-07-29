@@ -7,6 +7,7 @@ import pickle as _pickle
 import random as _random
 import warnings as _warnings
 
+import anytree as _anytree
 import mdtraj as _mdtraj
 import numpy as _np
 import openmmtools as _openmmtools
@@ -93,8 +94,9 @@ class GenericSMCSampler:
     logZ : float
         The current estimate of the dimensionless free energy difference.
     """
-    _picklable_attrs = ["total_sampling_steps", "lambda_", "lambda_history", "log_weights", "log_weight_history",
-                        "deltaE_history", "reporters", "logZ", "logZ_history", "transforms", "initialised"]
+    _picklable_attrs = ["total_sampling_steps", "_lambda_", "lambda_history", "log_weights", "log_weight_history",
+                        "deltaE_history", "logZ", "logZ_history", "transforms", "initialised", "state_tree",
+                        "_all_tree_nodes"]
 
     def __init__(self, coordinates, structure, integrator, moves, platform=None, platform_properties=None,
                  npt=True, checkpoint=None, md_config=None, alch_config=None):
@@ -125,32 +127,31 @@ class GenericSMCSampler:
         self._dummy_simulation = self.generateSimFromStruct(
             structure, self.alch_system, dummy_integrator, platform, platform_properties)
 
+        self.initialised = False
+        self.total_sampling_steps = 0
+        self.states = []
+        self.transforms = []
+        self._lambda_ = 0
+        self.lambda_history = [0]
+        self.log_weights = []
+        self.log_weight_history = []
+        self.deltaE_history = []
+        self.reporters = []
+        self.logZ = 0
+        self.logZ_history = [0]
+        self.state_tree = _anytree.Node(0, lambda_=None, iteration=None, transform=None)
+        self._all_tree_nodes = {self.state_tree}
+
         if checkpoint is not None:
             _logger.info("Loading checkpoint...")
             obj = _pickle.load(open(checkpoint, "rb"))["self"]
             for attr in self._picklable_attrs + ["states"]:
                 try:
                     self.__setattr__(attr, getattr(obj, attr))
+                    if attr == "_lambda_":
+                        self.simulation.integrator.setGlobalVariableByName("lambda", attr)
                 except AttributeError:
                     continue
-        else:
-            self.initialised = False
-            self.total_sampling_steps = 0
-            self.states = []
-            self.transforms = []
-            self.lambda_ = 0
-            self.lambda_history = [0]
-            self.log_weights = []
-            self.log_weight_history = []
-            self.deltaE_history = []
-            self.reporters = []
-            self.logZ = 0
-            self.logZ_history = [0]
-
-    @property
-    def alchemical_atoms(self):
-        """[int]: The absolute indices of all alchemical atoms."""
-        return self.moves.alchemical_atoms
 
     @property
     def trajectory_reporter(self):
@@ -179,6 +180,15 @@ class GenericSMCSampler:
         return None if reporter is None or len(reporter.filename_history) < 2 else reporter.filename_history[-2]
 
     @property
+    def alchemical_atoms(self):
+        """[int]: The absolute indices of all alchemical atoms."""
+        return self.moves.alchemical_atoms
+
+    @property
+    def iteration(self):
+        return self.lambda_history.count(0) - 1
+
+    @property
     def kT(self):
         """openmm.unit.Quantity: The current temperature multiplied by the gas constant."""
         try:
@@ -187,6 +197,38 @@ class GenericSMCSampler:
             return kT
         except AttributeError:
             return None
+
+    @property
+    def lambda_(self):
+        return self._lambda_
+
+    @lambda_.setter
+    def lambda_(self, val):
+        if val is not None and val != self._lambda_:
+            # update lambdas
+            self._lambda_ = val
+            self.lambda_history += [self._lambda_]
+            self.simulation.integrator.setGlobalVariableByName("lambda", self.lambda_)
+
+            # update deltaEs
+            if self._lambda_ in self._current_deltaEs.keys():
+                current_deltaEs = self._current_deltaEs[self._lambda_]
+            else:
+                current_deltaEs = self.calculateDeltaEs(val)
+                self._current_deltaEs = current_deltaEs
+            self.deltaE_history += [current_deltaEs]
+
+            # update log_weights
+            lengths = [len(x) if x is not None else 1 for x in self.transforms]
+            log_weights_old = self.log_weights[sum([[i] * x for i, x in enumerate(lengths)], [])]
+            weights_old = _np.exp(log_weights_old - _logsumexp(log_weights_old))
+            self.log_weights = log_weights_old - current_deltaEs
+            self.log_weights -= _logsumexp(self.log_weights)
+            self.log_weight_history += [self.log_weights]
+
+            # update logZs
+            self.logZ += _logsumexp(-current_deltaEs, b=weights_old)
+            self.logZ_history += [self.logZ]
 
     @property
     def moves(self):
@@ -215,6 +257,24 @@ class GenericSMCSampler:
         except AttributeError:
             return None
 
+    def tree_layer(self, lambda_=None, iteration=None, transform=None):
+        if lambda_ is None:
+            lambda_ = self.lambda_
+        if iteration is None:
+            iteration = self.iteration
+        nodes = [x for x in self._all_tree_nodes if x.lambda_ == lambda_ and x.iteration == iteration]
+        nodes.sort(key=lambda x: x.name)
+        if transform is True:
+            nodes = [x for x in nodes if x.transform is True]
+        elif transform is False:
+            nodes = [x for x in nodes if x.transform is False]
+        elif transform is None:
+            if any(x.transform == True for x in nodes):
+                nodes = [x for x in nodes if x.transform is True]
+            else:
+                nodes = [x for x in nodes if x.transform is False]
+        return nodes
+
     def serialise(self):
         new_self = _copy.copy(self)
         new_self.__dict__ = {x: y for x, y in new_self.__dict__.items() if x in self._picklable_attrs}
@@ -236,6 +296,17 @@ class GenericSMCSampler:
         _pickle.dump(backups, open(filename, "wb"), *args, **kwargs)
         if _os.path.exists(filename + ".old"):
             _os.remove(filename + ".old")
+
+    def calculateDeltaEs(self, lambda1, lambda0=None, states=None, transforms=None, *args, **kwargs):
+        if lambda0 is None:
+            lambda0 = self.lambda_
+        if states is None:
+            states = self.states
+        if transforms is None:
+            transforms = self.transforms
+        old_potentials = self.calculateStateEnergies(lambda0, states=states, transforms=transforms, *args, **kwargs)
+        new_potentials = self.calculateStateEnergies(lambda1, states=states, transforms=transforms, *args, **kwargs)
+        return new_potentials - old_potentials
 
     def calculateStateEnergies(self, lambda_, states=None, transforms=None, *args, **kwargs):
         """
@@ -380,10 +451,20 @@ class GenericSMCSampler:
 
     def initialise(self, n_walkers):
         if not self.initialised:
+            self.state_tree = _anytree.Node(0, lambda_=None, iteration=None, transform=None)
             if not len(self.states):
-                self.states = [self.simulation.context.getState(getPositions=True, getEnergy=True)] * n_walkers
-            elif len(self.states) < n_walkers:
-                self.states = (self.states * (n_walkers // len(self.states) + 1))[:n_walkers]
+                self.states = [self.simulation.context.getState(getPositions=True, getEnergy=True)]
+            equilibration_layer = [_anytree.Node(i, parent=self.state_tree, lambda_=None, iteration=self.iteration,
+                                                 transform=None) for i in range(len(self.states))]
+            if len(self.states) < n_walkers:
+                indices = ([i for i in range(len(self.states))] * (n_walkers // len(self.states) + 1))[:n_walkers]
+            else:
+                indices = [i for i in range(len(self.states))]
+            self.states = [self.states[i] for i in indices]
+            self._all_tree_nodes = set(equilibration_layer)
+            self._all_tree_nodes |= {_anytree.Node(i_new, parent=equilibration_layer[i_old], lambda_=self.lambda_,
+                                                   iteration=self.iteration, transform=False)
+                                     for i_new, i_old in enumerate(indices)}
             self.transforms = [None] * n_walkers
             self.log_weights = _np.log([1 / n_walkers] * n_walkers)
         self.initialised = True
@@ -458,12 +539,17 @@ class GenericSMCSampler:
                            dynamically_generate_transforms=True):
         if generate_transforms or (generate_transforms is None and self.lambda_ == 0):
             _logger.info("Generating {} total transforms...".format(len(self.states) * n_transforms_per_walker))
+            current_layer = self.tree_layer()
+            new_layer = set()
             new_states = []
             new_transforms = []
 
             for n, state in enumerate(self.states):
                 self.setState(state, self.simulation.context)
                 transforms = self.moves.generateMoves(n_transforms_per_walker)
+                new_layer |= {_anytree.Node(i, parent=current_layer[n], lambda_=self.lambda_,
+                                            iteration=self.iteration, transform=True)
+                              for i in range(n * n_transforms_per_walker, (n + 1) * n_transforms_per_walker)}
 
                 if not dynamically_generate_transforms:
                     state = self.simulation.context.getState(getPositions=True)
@@ -479,6 +565,7 @@ class GenericSMCSampler:
             self.log_weights = self.log_weights[
                 sum([[i] * n_transforms_per_walker for i in range(len(self.states))], [])]
             self.log_weights -= _logsumexp(self.log_weights)
+            self._all_tree_nodes |= new_layer
             self.states = new_states
             self.transforms = new_transforms
         else:
@@ -503,7 +590,7 @@ class GenericSMCSampler:
 
         # this is the function we are going to minimise
         def evaluateWeights(lambda_):
-            new_lambda = float(max(min(1., lambda_), 0))
+            new_lambda = float(max(min(1., lambda_), 0.))
             self._new_reduced_potentials = self.calculateStateEnergies(new_lambda, transforms=self.transforms)
             self._current_deltaEs[new_lambda] = self._new_reduced_potentials - self._current_reduced_potentials
             self._current_weights[new_lambda] = _np.exp(
@@ -546,31 +633,15 @@ class GenericSMCSampler:
             _logger.debug("Tentative next lambda: {:.8g}".format(next_lambda_))
         else:
             # else use default_dlambda
-            next_lambda_ = max(0, min(1., self.lambda_ + default_dlambda))
+            next_lambda_ = max(min(1., self.lambda_ + default_dlambda), 0.)
             evaluateWeights(next_lambda_)
 
+        del self._current_reduced_potentials, self._current_weights
         if change_lambda:
             # update histories, lambdas, and partition functions
-            self.change_lambda(next_lambda_)
+            self.lambda_ = next_lambda_
 
         return next_lambda_
-
-    def change_lambda(self, next_lambda):
-        if next_lambda is not None:
-            self.lambda_ = next_lambda
-            self.lambda_history += [self.lambda_]
-            self.simulation.integrator.setGlobalVariableByName("lambda", self.lambda_)
-            current_deltaEs = self._current_deltaEs[self.lambda_]
-            self._current_deltaEs, self._current_weights = {}, {}
-            self.deltaE_history += [current_deltaEs]
-            lengths = [len(x) if x is not None else 1 for x in self.transforms]
-            log_weights_old = self.log_weights[sum([[i] * x for i, x in enumerate(lengths)], [])]
-            weights_old = _np.exp(log_weights_old - _logsumexp(log_weights_old))
-            self.logZ += _logsumexp(-current_deltaEs, b=weights_old)
-            self.logZ_history += [self.logZ]
-            self.log_weights = log_weights_old - current_deltaEs
-            self.log_weights -= _logsumexp(self.log_weights)
-            self.log_weight_history += [self.log_weights]
 
     def resample(self,
                  n_walkers=1000,
@@ -580,22 +651,22 @@ class GenericSMCSampler:
                  states=None,
                  transforms=None,
                  change_states=True):
+        # prepare for resampling
+        if weights is None:
+            weights = _np.exp(self.log_weights)
+        if states is None:
+            states = self.states
+        if transforms is None:
+            transforms = self.transforms
+
+        indices = []
+        for i in range(len(self.states)):
+            if self.transforms[i] is None:
+                indices += [(i, None)]
+            else:
+                indices += [(i, j) for j in range(len(self.transforms[i]))]
+
         if resampling_method is not None:
-            # prepare for resampling
-            if weights is None:
-                weights = _np.exp(self.log_weights)
-            if states is None:
-                states = self.states
-            if transforms is None:
-                transforms = self.transforms
-
-            indices = []
-            for i in range(len(self.states)):
-                if self.transforms[i] is None:
-                    indices += [(i, None)]
-                else:
-                    indices += [(i, j) for j in range(len(self.transforms[i]))]
-
             # resample
             resampled_states = resampling_method.resample(indices, weights, n_walkers=n_walkers)[0]
             _random.shuffle(resampled_states)
@@ -612,14 +683,24 @@ class GenericSMCSampler:
             else:
                 log_weights -= log_weights
             log_weights -= _logsumexp(log_weights)
+            weights = _np.exp(log_weights)
+        else:
+            resampled_states = indices
+            log_weights = _np.log(weights)
 
-            # update the object, if applicable
-            if change_states:
-                self.log_weights = log_weights
-                self.states = states
-                self.transforms = transforms
+        # update the object, if applicable
+        if change_states:
+            old_state_indices = [indices.index(x) for x in resampled_states]
+            current_iteraton = self.iteration if self.lambda_ else self.iteration - 1
+            current_nodes = self.tree_layer(lambda_=self.lambda_history[-2], iteration=current_iteraton)
+            self._all_tree_nodes |= {_anytree.Node(i_new, parent=current_nodes[i_old], lambda_=self.lambda_,
+                                                   transform=False, iteration=current_iteraton)
+                                     for i_new, i_old in enumerate(old_state_indices)}
+            self.log_weights = log_weights
+            self.states = states
+            self.transforms = transforms
 
-            return _np.exp(log_weights), states, transforms
+        return weights, states, transforms, resampled_states
 
     def runSingleIteration(self,
                            sampling_metric=_sammetrics.EnergyCorrelation,
@@ -638,7 +719,6 @@ class GenericSMCSampler:
                            n_walkers=1000,
                            generate_transforms=None,
                            n_transforms_per_walker=100,
-                           equilibration_options=None,
                            dynamically_generate_transforms=True,
                            keep_walkers_in_memory=False,
                            write_checkpoint=None,
@@ -684,8 +764,6 @@ class GenericSMCSampler:
             False doesn't generate any transforms.
         n_transforms_per_walker : int
             How many transforms to generate for each walker. Only used if generate_transforms is not False or None.
-        equilibration_options : dict
-            Parameters to be passed to equilibrate(). Only used at lambda = 0.
         dynamically_generate_transforms : bool
             Whether to store the extra transforms as states or as transformations. The former is much faster, but also
             extremely memory-intensive. Only set to False if you are certain that you have enough memory.
@@ -778,7 +856,7 @@ class GenericSMCSampler:
             if next_lambda is None:
                 self.reweight(**reweight_kwargs)
             else:
-                self.change_lambda(next_lambda)
+                self.lambda_ = next_lambda
             break
 
         # resample
@@ -838,7 +916,7 @@ class GenericSMCSampler:
             if "load_checkpoint" in kwargs.keys():
                 kwargs.pop("load_checkpoint")
 
-        if not self.lambda_:
+        if self.lambda_ == 0 and not self.initialised:
             for _ in range(n_equilibrations):
                 old_state = self.simulation.context.getState(getPositions=True)
                 self.equilibrate(equilibration_steps=equilibration_steps,
