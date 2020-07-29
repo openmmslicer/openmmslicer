@@ -16,7 +16,6 @@ import simtk.openmm as _openmm
 import simtk.openmm.app as _app
 import simtk.unit as _unit
 
-import slicer.integrators as _integrators
 from slicer.minimise import BisectingMinimiser as _BisectingMinimiser
 import slicer.moves as _moves
 import slicer.reporters as _reporters
@@ -97,13 +96,23 @@ class GenericSMCSampler:
     _picklable_attrs = ["total_sampling_steps", "_lambda_", "lambda_history", "log_weights", "log_weight_history",
                         "deltaE_history", "logZ", "logZ_history", "transforms", "initialised", "state_tree",
                         "_all_tree_nodes"]
+    default_alchemical_functions = {
+        'lambda_sterics': lambda x: min(1.25 * x, 1.),
+        'lambda_electrostatics': lambda x: max(0., 5. * x - 4.),
+        'lambda_torsions': lambda x: min(1.25 * x, 1.),
+    }
 
-    def __init__(self, coordinates, structure, integrator, moves, platform=None, platform_properties=None,
-                 npt=True, checkpoint=None, md_config=None, alch_config=None):
+    def __init__(self, coordinates, structure, integrator, moves, alchemical_functions=None, platform=None,
+                 platform_properties=None, npt=True, checkpoint=None, md_config=None, alch_config=None):
         if md_config is None:
             md_config = {}
         if alch_config is None:
             alch_config = {}
+        if alchemical_functions is None:
+            alchemical_functions = {}
+        self.alchemical_functions = {**self.default_alchemical_functions, **alchemical_functions}
+        for func in self.alchemical_functions.values():
+            assert func(0) == 0 and func(1) == 1, "All alchemical functions must go from 0 to 1"
 
         self.coordinates = coordinates
         self.moves = moves
@@ -122,10 +131,6 @@ class GenericSMCSampler:
         self.integrator = _copy.copy(integrator)
         self.simulation = self.generateSimFromStruct(
             structure, self.alch_system, self.integrator, platform, platform_properties)
-        # this is only used for energy evaluation
-        dummy_integrator = _integrators.AlchemicalEnergyEvaluator(alchemical_functions=integrator._alchemical_functions)
-        self._dummy_simulation = self.generateSimFromStruct(
-            structure, self.alch_system, dummy_integrator, platform, platform_properties)
 
         self.initialised = False
         self.total_sampling_steps = 0
@@ -149,7 +154,7 @@ class GenericSMCSampler:
                 try:
                     self.__setattr__(attr, getattr(obj, attr))
                     if attr == "_lambda_":
-                        self.simulation.integrator.setGlobalVariableByName("lambda", attr)
+                        self._update_alchemical_lambdas(attr)
                 except AttributeError:
                     continue
 
@@ -208,7 +213,7 @@ class GenericSMCSampler:
             # update lambdas
             self._lambda_ = val
             self.lambda_history += [self._lambda_]
-            self.simulation.integrator.setGlobalVariableByName("lambda", self.lambda_)
+            self._update_alchemical_lambdas(self._lambda_)
 
             # update deltaEs
             if self._lambda_ in self._current_deltaEs.keys():
@@ -332,20 +337,23 @@ class GenericSMCSampler:
         energies = []
         for i, state in enumerate(states):
             if transforms is None or transforms[i] is None:
-                self.setState(state, self._dummy_simulation.context, transform=None, *args, **kwargs)
-                energies += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(lambda_) / self.kT]
+                self.setState(state, transform=None, *args, **kwargs)
+                self._update_alchemical_lambdas(lambda_)
+                energies += [self.simulation.context.getState(getEnergy=True).getPotentialEnergy() / self.kT]
             else:
                 # here we optimise by only loading the state once from the hard drive, if applicable
                 if type(state) is int:
-                    self.setState(state, self._dummy_simulation.context, *args, **kwargs)
-                    state = self._dummy_simulation.context.getState(getPositions=True)
+                    self.setState(state, *args, **kwargs)
+                    state = self.simulation.context.getState(getPositions=True)
                 for t in transforms[i]:
-                    self.setState(state, self._dummy_simulation.context, transform=t, *args, **kwargs)
-                    energies += [self._dummy_simulation.integrator.getPotentialEnergyFromLambda(lambda_) / self.kT]
+                    self.setState(state, transform=t, *args, **kwargs)
+                    self._update_alchemical_lambdas(lambda_)
+                    energies += [self.simulation.context.getState(getEnergy=True).getPotentialEnergy() / self.kT]
+        self._update_alchemical_lambdas(self.lambda_)
 
         return _np.asarray(energies, dtype=_np.float32)
 
-    def setState(self, state, context, reporter_filename=None, transform=None):
+    def setState(self, state, context=None, reporter_filename=None, transform=None):
         """
         Sets a given state to the current context.
 
@@ -354,13 +362,15 @@ class GenericSMCSampler:
         state : int, openmm.State
             Either sets the state from a State object or from a frame of a trajectory file given by reporter_filename.
         context : openmm.Context
-            The context to which the state needs to be applied.
+            The context to which the state needs to be applied. Default is GenericSMCSampler.simulation.context
         reporter_filename : str
             The path to the trajectory file containing the relevant frame, if applicable. Default is
             current_trajectory_filename.
         transform :
             Optionally generate a transform dynamically from a format, specific to the underlying moves.
         """
+        if context is None:
+            context = self.simulation.context
         if reporter_filename is None:
             reporter_filename = self.current_trajectory_filename
         if type(state) is int:
@@ -373,6 +383,14 @@ class GenericSMCSampler:
             context.setState(state)
         if transform is not None:
             self.moves.applyMove(context, transform)
+
+    def _update_alchemical_lambdas(self, lambda_):
+        valid_parameters = [x for x in self.simulation.context.getParameters()]
+        for param, func in self.alchemical_functions.items():
+            if param in valid_parameters:
+                val = float(func(lambda_))
+                assert 0 <= val <= 1, "All lambda functions must evaluate between 0 and 1"
+                self.simulation.context.setParameter(param, val)
 
     def equilibrate(self,
                     equilibration_steps=100000,
@@ -435,7 +453,7 @@ class GenericSMCSampler:
 
         # run the equilibration
         _logger.info("Running initial equilibration...")
-        self.simulation.integrator.setGlobalVariableByName("lambda", 0.)
+        self._update_alchemical_lambdas(0.)
         self.simulation.context.setVelocitiesToTemperature(self.temperature)
         self.simulation.step(equilibration_steps)
 
@@ -960,7 +978,7 @@ class GenericSMCSampler:
                            softcore_a=1,
                            softcore_b=1,
                            softcore_c=6,
-                           softcore_beta=0.5,
+                           softcore_beta=0,
                            softcore_d=1,
                            softcore_e=1,
                            softcore_f=2,

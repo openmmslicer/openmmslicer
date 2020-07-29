@@ -1,4 +1,3 @@
-from . import integrators
 from . import moves
 from . import reporters
 from . import resampling_metrics
