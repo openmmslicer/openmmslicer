@@ -84,8 +84,8 @@ class GenericSMCSampler:
         A list containing all past deltaE values.
     log_weight_history : list
         A list containing all past weights used for resampling.
-    reporter : slicer.reporters.MultistateDCDReporter, None
-        The reporter containing all trajectory files.
+    reporters : [slicer.reporters.MultistateDCDReporter, slicer.reporters.MulsistateStateDataReporter]
+        The reporter list containing all multistate reporters.
     states : [int] or [openmm.State]
         A list containing all current states.
     transforms : list
@@ -94,8 +94,8 @@ class GenericSMCSampler:
         The current estimate of the dimensionless free energy difference.
     """
     _picklable_attrs = ["total_sampling_steps", "_lambda_", "lambda_history", "log_weights", "log_weight_history",
-                        "deltaE_history", "logZ", "logZ_history", "transforms", "initialised", "state_tree",
-                        "_all_tree_nodes"]
+                        "deltaE_history", "logZ", "logZ_history", "states", "transforms", "initialised", "state_tree",
+                        "_all_tree_nodes", "reporters"]
     default_alchemical_functions = {
         'lambda_sterics': lambda x: min(1.25 * x, 1.),
         'lambda_electrostatics': lambda x: max(0., 5. * x - 4.),
@@ -150,13 +150,13 @@ class GenericSMCSampler:
         if checkpoint is not None:
             _logger.info("Loading checkpoint...")
             obj = _pickle.load(open(checkpoint, "rb"))["self"]
-            for attr in self._picklable_attrs + ["states"]:
+            for attr in self._picklable_attrs:
                 try:
                     self.__setattr__(attr, getattr(obj, attr))
                     if attr == "_lambda_":
-                        self._update_alchemical_lambdas(attr)
+                        self._update_alchemical_lambdas(self.lambda_)
                 except AttributeError:
-                    continue
+                    _warnings.warn("There was missing or incompatible data from the checkpoint: {}".format(attr))
 
     @property
     def trajectory_reporter(self):
@@ -286,6 +286,7 @@ class GenericSMCSampler:
         new_self = _copy.copy(self)
         new_self.__dict__ = {x: y for x, y in new_self.__dict__.items() if x in self._picklable_attrs}
         new_self.states = [i for i in range(len(self.states))]
+        new_self.reporters = [new_self.trajectory_reporter]
         return new_self
 
     def writeCheckpoint(self, data, filename="checkpoint.pickle", update=True, *args, **kwargs):
@@ -293,7 +294,7 @@ class GenericSMCSampler:
         if update:
             try:
                 backups = _pickle.load(open(filename, "rb"))
-            except (FileNotFoundError, _pickle.UnpicklingError):
+            except (FileNotFoundError, _pickle.UnpicklingError, EOFError):
                 pass
         backups.update(data)
         backups["self"] = self.serialise()
@@ -505,6 +506,8 @@ class GenericSMCSampler:
             append = True if load_checkpoint else False
             self.simulation.reporters.append(self.trajectory_reporter.generateReporter(
                 round(self.lambda_, 8), default_decorrelation_steps, append=append))
+            if load_checkpoint:
+                self.trajectory_reporter.prune()
         if self.state_data_reporters is not None:
             self.simulation.reporters += self.state_data_reporters
 
@@ -512,11 +515,7 @@ class GenericSMCSampler:
         if load_checkpoint is not None:
             _logger.info("Loading instant checkpoint...")
             data = _pickle.load(open(load_checkpoint, "rb"))
-            n = 0
-            attrs = ["n"]
-            if all(attr in data.keys() for attr in attrs):
-                for attr in attrs:
-                    exec("{0} = data.{0}".format(attr))
+            n = 0 if "n" not in data.keys() else data["n"]
             generator = ((i, (i, self.transforms[i])) for i in range(n + 1, len(self.states)))
         else:
             generator = enumerate(zip(self.states, self.transforms))
@@ -545,8 +544,7 @@ class GenericSMCSampler:
 
             # write checkpoint, if applicable
             if write_checkpoint is not None:
-                data = {attr: locals()[attr] for attr in ["n"]}
-                self.writeCheckpoint(data, filename=write_checkpoint, update=True)
+                self.writeCheckpoint({"n": n}, filename=write_checkpoint, update=True)
 
         # reset the reporter
         self.simulation.reporters = [x for x in self.simulation.reporters if x not in self.reporters]
@@ -815,7 +813,7 @@ class GenericSMCSampler:
         )
         self.initialise(n_walkers)
 
-        if self.lambda_ and sampling_metric:
+        if self.lambda_ and sampling_metric and not load_checkpoint:
             sampling_metric.evaluateBefore()
         elapsed_steps = 0
         while True:
@@ -824,11 +822,18 @@ class GenericSMCSampler:
             if load_checkpoint is not None:
                 _logger.info("Loading instant checkpoint...")
                 data = _pickle.load(open(load_checkpoint, "rb"))
-                attrs = ["elapsed_steps"]
-                if all(attr in data.keys() for attr in attrs):
+                # continue the simulation from the relevant iteration
+                if "elapsed_steps" in data.keys():
+                    elapsed_steps = data["elapsed_steps"]
                     skip_sampling = True
-                    for attr in attrs:
-                        exec("{0} = data.{0}".format(attr))
+                if "sampling_metric" in data.keys() and data["sampling_metric"] is not None:
+                    sampling_metric.__dict__.update(data["sampling_metric"])
+                # continue the iteration from a particular walker
+                if "n" in data.keys():
+                    skip_sampling = False
+                    # write a checkpoint so that it can get updated by the sampler
+                    if write_checkpoint is not None:
+                        self.writeCheckpoint(data, filename=write_checkpoint, update=False)
 
             # sample
             if not skip_sampling:
@@ -842,7 +847,8 @@ class GenericSMCSampler:
 
             # write checkpoint, if applicable
             if write_checkpoint is not None:
-                data = {attr: locals()[attr] for attr in ["elapsed_steps"]}
+                sampling_backup = sampling_metric.serialise() if sampling_metric is not None else None
+                data = {"self": self.serialise(), "elapsed_steps": elapsed_steps, "sampling_metric": sampling_backup}
                 self.writeCheckpoint(data, filename=write_checkpoint, update=False)
                 load_checkpoint = None
 
@@ -885,6 +891,10 @@ class GenericSMCSampler:
             resampling_method=resampling_method,
             exact_weights=exact_weights
         )
+
+        # write checkpoint, if applicable
+        if write_checkpoint:
+            self.writeCheckpoint({"self": self.serialise()}, filename=write_checkpoint, update=False)
 
         # dump info to logger
         _logger.info("Sampling at lambda = {:.8g} terminated after {} steps per walker".format(self.lambda_history[-2],

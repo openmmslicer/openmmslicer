@@ -1,3 +1,4 @@
+import copy as _copy
 import itertools as _it
 import os as _os
 
@@ -48,6 +49,11 @@ class MultistateDCDReporter:
         self.current_reporter = None
         self.filename_history = []
         self.prunable_filenames = []
+
+    def serialise(self):
+        new_self = _copy.copy(self)
+        new_self.current_reporter = None
+        return new_self
 
 
 class MultistateStateDataReporter(_StateDataReporter):
