@@ -12,8 +12,8 @@ class MultistateDCDReporter:
         self.filebase = _os.path.abspath(filebase)
         self.reset()
 
-    def generateReporter(self, lambda_, *args, append=False, **kwargs):
-        self.current_filename = self.filebase.format(lambda_)
+    def generateReporter(self, label, *args, append=False, **kwargs):
+        self.current_filename = self.filebase.format(label)
 
         if not append and _os.path.exists(self.current_filename):
             prev_filebase, ext = _os.path.splitext(self.current_filename)

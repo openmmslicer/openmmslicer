@@ -2,3 +2,4 @@ anytree
 mdtraj
 numpy
 scipy
+pymbar

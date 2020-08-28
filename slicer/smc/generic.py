@@ -2,12 +2,12 @@ from collections import Counter as _Counter
 import copy as _copy
 import inspect as _inspect
 import logging as _logging
+import math as _math
 import os as _os
 import pickle as _pickle
 import random as _random
 import warnings as _warnings
 
-import anytree as _anytree
 import mdtraj as _mdtraj
 import numpy as _np
 import openmmtools as _openmmtools
@@ -16,6 +16,7 @@ import simtk.openmm as _openmm
 import simtk.openmm.app as _app
 import simtk.unit as _unit
 
+from .misc import Walker as _Walker
 from slicer.minimise import BisectingMinimiser as _BisectingMinimiser
 import slicer.moves as _moves
 import slicer.reporters as _reporters
@@ -78,24 +79,18 @@ class GenericSMCSampler:
         The current lambda value.
     total_sampling_steps : int
         A counter keeping track of the number of times the integrator was called.
-    lambda_history : list
-        A list containing all past lambda values.
-    deltaE_history : list
-        A list containing all past deltaE values.
-    log_weight_history : list
-        A list containing all past weights used for resampling.
+    lambda_history : dict
+        A dictionary containing all past lambda values.
     reporters : [slicer.reporters.MultistateDCDReporter, slicer.reporters.MulsistateStateDataReporter]
         The reporter list containing all multistate reporters.
-    states : [int] or [openmm.State]
-        A list containing all current states.
-    transforms : list
-        A list containing all relevant transforms to be applied for each state.
+    walkers : [slicer.smc.misc.Walker]
+        A list containing all current walkers.
     logZ : float
         The current estimate of the dimensionless free energy difference.
     """
-    _picklable_attrs = ["total_sampling_steps", "_lambda_", "lambda_history", "log_weights", "log_weight_history",
-                        "deltaE_history", "logZ", "logZ_history", "states", "transforms", "initialised", "state_tree",
-                        "_all_tree_nodes", "reporters"]
+    # TODO: make pickle work
+    _picklable_attrs = ["total_sampling_steps", "_lambda_", "lambda_history", "walkers", "initialised", "walker_tree",
+                        "_all_walkers", "reporters"]
     default_alchemical_functions = {
         'lambda_sterics': lambda x: min(1.25 * x, 1.),
         'lambda_electrostatics': lambda x: max(0., 5. * x - 4.),
@@ -134,18 +129,12 @@ class GenericSMCSampler:
 
         self.initialised = False
         self.total_sampling_steps = 0
-        self.states = []
-        self.transforms = []
-        self._lambda_ = 0
-        self.lambda_history = [0]
-        self.log_weights = []
-        self.log_weight_history = []
-        self.deltaE_history = []
+        self._lambda_ = 0.
+        self.lambda_history = [0.]
         self.reporters = []
-        self.logZ = 0
-        self.logZ_history = [0]
-        self.state_tree = _anytree.Node(0, lambda_=None, iteration=None, transform=None)
-        self._all_tree_nodes = {self.state_tree}
+        self.walker_tree = _Walker(0, lambda_=None, iteration=None, transform=None)
+        self._all_walkers = [self.walker_tree]
+        self.walkers = []
 
         if checkpoint is not None:
             _logger.info("Loading checkpoint...")
@@ -190,10 +179,6 @@ class GenericSMCSampler:
         return self.moves.alchemical_atoms
 
     @property
-    def iteration(self):
-        return self.lambda_history.count(0) - 1
-
-    @property
     def kT(self):
         """openmm.unit.Quantity: The current temperature multiplied by the gas constant."""
         try:
@@ -203,39 +188,53 @@ class GenericSMCSampler:
         except AttributeError:
             return None
 
+    def iteration(self, lambda_=None):
+        if lambda_ is None:
+            lambda_ = self.lambda_
+        return len([x for x in self.lambda_history if _math.isclose(x, lambda_)]) - 1
+
     @property
     def lambda_(self):
         return self._lambda_
 
     @lambda_.setter
     def lambda_(self, val):
-        if val is not None and val != self._lambda_:
+        if val is not None:
+            assert 0 <= val <= 1, "The lambda value must be between 0 and 1"
+            current_weights = _np.asarray([0 if walker.logW is None else walker.logW for walker in self.walkers])
+
             # update deltaEs
-            if isinstance(self._current_deltaEs, dict) and val in self._current_deltaEs.keys():
-                current_deltaEs = self._current_deltaEs[val]
+            if val != self._lambda_:
+                deltaEs = self.calculateDeltaEs(val)
+                new_weights = current_weights - deltaEs
             else:
-                current_deltaEs = self.calculateDeltaEs(val)
-                self._current_deltaEs = current_deltaEs
-            self.deltaE_history += [current_deltaEs]
+                new_weights = current_weights
 
             # update lambdas
-            self._lambda_ = val
+            self._lambda_ = float(val)
             self.lambda_history += [self._lambda_]
             self._update_alchemical_lambdas(self._lambda_)
 
-            # update log_weights
-            lengths = [len(x) if x is not None else 1 for x in self.transforms]
-            indices = sum([[i] * x for i, x in enumerate(lengths)], [])
-            log_weights_old = self.log_weights[indices]
-            log_weights_old[indices] -= _np.log([lengths[i] for i in indices])
-            weights_old = _np.exp(log_weights_old - _logsumexp(log_weights_old))
-            self.log_weights = log_weights_old - current_deltaEs
-            self.log_weights -= _logsumexp(self.log_weights)
-            self.log_weight_history += [self.log_weights]
+            # update walkers
+            self.walkers = [_Walker(i,
+                                    parent=walker,
+                                    state=walker.state,
+                                    transform=walker.transform,
+                                    reporter_filename=walker.reporter_filename,
+                                    frame=walker.frame,
+                                    lambda_=self.lambda_,
+                                    iteration=self.iteration(),
+                                    logW=new_weights[i])
+                            for i, (logW, walker) in enumerate(zip(new_weights, self.walkers))]
 
-            # update logZs
-            self.logZ += _logsumexp(-current_deltaEs, b=weights_old)
-            self.logZ_history += [self.logZ]
+    @property
+    def log_weights(self):
+        relative_logW = _np.asarray([0 if walker.logW is None else walker.logW for walker in self.walkers])
+        return relative_logW - _logsumexp(relative_logW)
+
+    @property
+    def logZ(self):
+        return _logsumexp([0 if walker.logW is None else walker.logW for walker in self.walkers]) - _np.log(len(self.walkers))
 
     @property
     def moves(self):
@@ -253,7 +252,19 @@ class GenericSMCSampler:
     @property
     def n_walkers(self):
         """int: The number of current walkers."""
-        return len(self.states)
+        return len(self.walkers)
+
+    @property
+    def walkers(self):
+        return self._walkers
+
+    @walkers.setter
+    def walkers(self, val):
+        self._all_walkers = [x for x in self._all_walkers if x not in val] + val
+        self._walkers = val
+        for walker in self._all_walkers:
+            if walker not in val:
+                walker.state = None
 
     @property
     def temperature(self):
@@ -264,28 +275,14 @@ class GenericSMCSampler:
         except AttributeError:
             return None
 
-    def tree_layer(self, lambda_=None, iteration=None, transform=None):
-        if lambda_ is None:
-            lambda_ = self.lambda_
-        if iteration is None:
-            iteration = self.iteration
-        nodes = [x for x in self._all_tree_nodes if x.lambda_ == lambda_ and x.iteration == iteration]
-        nodes.sort(key=lambda x: x.name)
-        if transform is True:
-            nodes = [x for x in nodes if x.transform is True]
-        elif transform is False:
-            nodes = [x for x in nodes if x.transform is False]
-        elif transform is None:
-            if any(x.transform == True for x in nodes):
-                nodes = [x for x in nodes if x.transform is True]
-            else:
-                nodes = [x for x in nodes if x.transform is False]
-        return nodes
+    @property
+    def weights(self):
+        return _np.exp(self.log_weights)
 
     def serialise(self):
         new_self = _copy.copy(self)
         new_self.__dict__ = {x: y for x, y in new_self.__dict__.items() if x in self._picklable_attrs}
-        new_self.states = [i for i in range(len(self.states))]
+        new_self.walkers = [i for i in range(len(self.walkers))]
         new_self.reporters = [new_self.trajectory_reporter]
         return new_self
 
@@ -305,18 +302,14 @@ class GenericSMCSampler:
         if _os.path.exists(filename + ".old"):
             _os.remove(filename + ".old")
 
-    def calculateDeltaEs(self, lambda1, lambda0=None, states=None, transforms=None, *args, **kwargs):
-        if lambda0 is None:
-            lambda0 = self.lambda_
-        if states is None:
-            states = self.states
-        if transforms is None:
-            transforms = self.transforms
-        old_potentials = self.calculateStateEnergies(lambda0, states=states, transforms=transforms, *args, **kwargs)
-        new_potentials = self.calculateStateEnergies(lambda1, states=states, transforms=transforms, *args, **kwargs)
+    def calculateDeltaEs(self, lambda1=None, lambda0=None, walkers=None, **kwargs):
+        if walkers is None:
+            walkers = self.walkers
+        old_potentials = self.calculateStateEnergies(lambda0, walkers=walkers, **kwargs)
+        new_potentials = self.calculateStateEnergies(lambda1, walkers=walkers, **kwargs)
         return new_potentials - old_potentials
 
-    def calculateStateEnergies(self, lambda_, states=None, transforms=None, *args, **kwargs):
+    def calculateStateEnergies(self, lambda_=None, walkers=None, **kwargs):
         """
         Calculates the reduced potential energies of all states for a given lambda value.
 
@@ -324,68 +317,104 @@ class GenericSMCSampler:
         ----------
         lambda_ : float
             The desired lambda value.
-        states : [int] or [openmm.State] or None
-            Which states need to be used. If None, self.states are used. Otherwise, these could be in any
+        walkers : [int] or [openmm.State] or None
+            Which walkers need to be used. If None, self.walkers are used. Otherwise, these could be in any
             format supported by setState().
-        transforms : list
-            Extra transforms to be passed to setState().
-        args
-            Positional arguments to be passed to setState().
         kwargs
             Keyword arguments to be passed to setState().
         """
-        if states is None:
-            states = self.states
+        if walkers is None:
+            walkers = self.walkers
+        if lambda_ is None:
+            lambdas = _np.asarray([walker.lambda_ for walker in walkers])
+        else:
+            lambdas = _np.full(len(walkers), lambda_)
 
-        energies = []
-        for i, state in enumerate(states):
-            if transforms is None or transforms[i] is None:
-                self.setState(state, transform=None, *args, **kwargs)
+        energies = _np.zeros(len(walkers))
+
+        # determine unique walkers for optimal loading from hard drive
+        unique_walkers = {}
+        for i, (walker, lambda_) in enumerate(zip(walkers, lambdas)):
+            key = None
+            if isinstance(walker, _Walker) and not any(_math.isclose(lambda_, x) for x in walker._energy_cache.keys()) \
+                    and walker.state is None:
+                key = (walker.reporter_filename, walker.frame)
+                if any(x is None for x in key):
+                    raise ValueError("Walkers need to contain either an OpenMM State or a valid trajectory path and "
+                                     "frame number")
+            if key not in unique_walkers.keys():
+                unique_walkers[key] = []
+            unique_walkers[key] += [i]
+
+        for key, group in unique_walkers.items():
+            # modify all walkers with a single read from the hard drive, if applicable
+            if key is not None:
+                previous_states = [walkers[i].state for i in group]
+                dummy_state = _copy.copy(walkers[group[0]])
+                dummy_state.transform = None
+                self.setState(dummy_state)
+                state = self.simulation.context.getState(getPositions=True)
+                for i in group:
+                    walkers[i].setStateKeepCache(state)
+
+            # calculate the energies
+            for i in group:
+                walker = walkers[i]
+                lambda_ = lambdas[i]
+                # get cached energy and skip energy evaluation, if applicable
+                if isinstance(walkers[i], _Walker):
+                    energy = walkers[i].getCachedEnergy(lambda_)
+                    if energy is not None:
+                        energies[i] = energy
+                        continue
+
+                # calculate energy and set cache
+                self.setState(walker, **kwargs)
                 self._update_alchemical_lambdas(lambda_)
-                energies += [self.simulation.context.getState(getEnergy=True).getPotentialEnergy() / self.kT]
-            else:
-                # here we optimise by only loading the state once from the hard drive, if applicable
-                if type(state) is int:
-                    self.setState(state, *args, **kwargs)
-                    state = self.simulation.context.getState(getPositions=True)
-                for t in transforms[i]:
-                    self.setState(state, transform=t, *args, **kwargs)
-                    self._update_alchemical_lambdas(lambda_)
-                    energies += [self.simulation.context.getState(getEnergy=True).getPotentialEnergy() / self.kT]
+                energy = self.simulation.context.getState(getEnergy=True).getPotentialEnergy() / self.kT
+                if isinstance(walker, _Walker):
+                    walker.setCachedEnergy(lambda_, energy)
+                energies[i] = energy
+
+            # restore original walkers
+            if key is not None:
+                for i, previous_state in zip(group, previous_states):
+                    walkers[i].setStateKeepCache(previous_state)
+
         self._update_alchemical_lambdas(self.lambda_)
 
         return _np.asarray(energies, dtype=_np.float32)
 
-    def setState(self, state, context=None, reporter_filename=None, transform=None):
+    def setState(self, state, context=None):
         """
         Sets a given state to the current context.
 
         Parameters
         ----------
-        state : int, openmm.State
-            Either sets the state from a State object or from a frame of a trajectory file given by reporter_filename.
+        state : openmm.State, slicer.utils.Walker
+            Sets the state from either an openmm.State object or a slicer.utils.Walker object.
         context : openmm.Context
-            The context to which the state needs to be applied. Default is GenericSMCSampler.simulation.context
-        reporter_filename : str
-            The path to the trajectory file containing the relevant frame, if applicable. Default is
-            current_trajectory_filename.
-        transform :
-            Optionally generate a transform dynamically from a format, specific to the underlying moves.
+            The context to which the state needs to be applied. Default is GenericSMCSampler.simulation.context.
         """
         if context is None:
             context = self.simulation.context
-        if reporter_filename is None:
-            reporter_filename = self.current_trajectory_filename
-        if type(state) is int:
-            frame = _mdtraj.load_frame(reporter_filename, state, self.coordinates)
-            positions = frame.xyz[0]
-            periodic_box_vectors = frame.unitcell_vectors[0]
-            context.setPositions(positions)
-            context.setPeriodicBoxVectors(*periodic_box_vectors)
-        else:
+        if isinstance(state, _openmm.State):
+            if self.initialised:
+                _warnings.warn("Manually changing the state in an initialised SMC run can break functionality")
             context.setState(state)
-        if transform is not None:
-            self.moves.applyMove(context, transform)
+        elif isinstance(state, _Walker):
+            if state.state is not None:
+                context.setState(state.state)
+            else:
+                frame = _mdtraj.load_frame(state.reporter_filename, state.frame, self.coordinates)
+                positions = frame.xyz[0]
+                periodic_box_vectors = frame.unitcell_vectors[0]
+                context.setPositions(positions)
+                context.setPeriodicBoxVectors(*periodic_box_vectors)
+            if state.transform is not None:
+                self.moves.applyMove(context, state.transform)
+        else:
+            raise TypeError("Unrecognised parameter type {}".format(type(state)))
 
     def _update_alchemical_lambdas(self, lambda_):
         valid_parameters = [x for x in self.simulation.context.getParameters()]
@@ -472,72 +501,83 @@ class GenericSMCSampler:
 
     def initialise(self, n_walkers):
         if not self.initialised:
-            self.state_tree = _anytree.Node(0, lambda_=None, iteration=None, transform=None)
-            if not len(self.states):
-                self.states = [self.simulation.context.getState(getPositions=True, getEnergy=True)]
-            equilibration_layer = [_anytree.Node(i, parent=self.state_tree, lambda_=None, iteration=self.iteration,
-                                                 transform=None) for i in range(len(self.states))]
-            if len(self.states) < n_walkers:
-                indices = ([i for i in range(len(self.states))] * (n_walkers // len(self.states) + 1))[:n_walkers]
-            else:
-                indices = [i for i in range(len(self.states))]
-            self.states = [self.states[i] for i in indices]
-            self._all_tree_nodes = set(equilibration_layer)
-            self._all_tree_nodes |= {_anytree.Node(i_new, parent=equilibration_layer[i_old], lambda_=self.lambda_,
-                                                   iteration=self.iteration, transform=False)
-                                     for i_new, i_old in enumerate(indices)}
-            self.transforms = [None] * n_walkers
-            self.log_weights = _np.log([1 / n_walkers] * n_walkers)
+            # root layer
+            self.walker_tree = _Walker(0)
+            if not len(self.walkers):
+                state = self.simulation.context.getState(getPositions=True, getEnergy=True)
+                self.walkers = [_Walker(0, parent=self.walker_tree.root, state=state)]
+            # lambda = 0 layer
+            self.walkers = [_Walker(i,
+                                    parent=self.walkers[i % len(self.walkers)],
+                                    state=self.walkers[i % len(self.walkers)].state,
+                                    reporter_filename=self.walkers[i % len(self.walkers)].reporter_filename,
+                                    frame=self.walkers[i % len(self.walkers)].frame,
+                                    lambda_=self.lambda_,
+                                    iteration=self.iteration(),
+                                    logW=0)
+                            for i in range(max(n_walkers, len(self.walkers)))]
         self.initialised = True
 
     def sample(self,
                default_decorrelation_steps=500,
                keep_walkers_in_memory=False,
                write_checkpoint=None,
-               load_checkpoint=None):
+               load_checkpoint=None,
+               reporter_filename=None,
+               append=False):
         if not keep_walkers_in_memory and self.trajectory_reporter is None:
             raise ValueError("Need to set a reporter if trajectory is not kept in memory.")
         if write_checkpoint and self.trajectory_reporter is None:
             raise ValueError("Need to set a reporter when storing a checkpoint.")
-        default_decorrelation_steps = max(1, default_decorrelation_steps)
+
+        initial_frame = 0
 
         # set up a reporter, if applicable
         if self.trajectory_reporter is not None:
-            append = True if load_checkpoint else False
+            append = True if load_checkpoint else append
+            label = reporter_filename if reporter_filename is not None else str(round(self.lambda_, 8))
             self.simulation.reporters.append(self.trajectory_reporter.generateReporter(
-                round(self.lambda_, 8), default_decorrelation_steps, append=append))
+                label, default_decorrelation_steps, append=append))
             if load_checkpoint:
                 self.trajectory_reporter.prune()
+            if append:
+                duplicates = [w for w in self._all_walkers if w.reporter_filename == self.current_trajectory_filename]
+                initial_frame = max([w.frame for w in duplicates]) + 1 if len(duplicates) else 0
         if self.state_data_reporters is not None:
             self.simulation.reporters += self.state_data_reporters
 
         # load checkpoint, if applicable
         if load_checkpoint is not None:
+            # TODO take care of reporters and state updates
             _logger.info("Loading instant checkpoint...")
             data = _pickle.load(open(load_checkpoint, "rb"))
             n = 0 if "n" not in data.keys() else data["n"]
-            generator = ((i, (i, self.transforms[i])) for i in range(n + 1, len(self.states)))
+            generator = ((i, self.walkers[i]) for i in range(n + 1, len(self.walkers)))
         else:
-            generator = enumerate(zip(self.states, self.transforms))
+            generator = enumerate(self.walkers)
 
-        for n, (state, transform) in generator:
+        for walker in self.walkers:
+            if walker.reporter_filename == self.current_trajectory_filename:
+                walker.reporter_filename = self.previous_trajectory_filename
+
+        for n, walker in generator:
             # update the state data reporters, if applicable
             if self.state_data_reporters is not None:
                 for r in self.state_data_reporters:
                     r.update(self, n)
             # sample
-            self.setState(state, self.simulation.context, reporter_filename=self.previous_trajectory_filename,
-                          transform=transform)
+            self.setState(walker)
             self.simulation.context.setVelocitiesToTemperature(self.temperature)
             self.simulation.step(default_decorrelation_steps)
 
-            # update states
+            # update walkers
             if keep_walkers_in_memory:
-                self.states[n] = self.simulation.context.getState(getPositions=True, getEnergy=True)
+                walker.state = self.simulation.context.getState(getPositions=True, getEnergy=True)
             else:
-                self.states[n] = n
-            if self.transforms is not None:
-                self.transforms[n] = None
+                walker.state = None
+            walker.transform = None
+            walker.reporter_filename = self.current_trajectory_filename
+            walker.frame = n + initial_frame if walker.reporter_filename is not None else None
 
             # update statistics
             self.total_sampling_steps += default_decorrelation_steps
@@ -548,46 +588,29 @@ class GenericSMCSampler:
 
         # reset the reporter
         self.simulation.reporters = [x for x in self.simulation.reporters if x not in self.reporters]
-        if self.trajectory_reporter:
+        if self.trajectory_reporter is not None:
+            self.simulation.reporters.remove(self.trajectory_reporter.current_reporter)
             self.trajectory_reporter.prune()
 
     def generateTransforms(self,
                            n_transforms_per_walker=100,
-                           generate_transforms=None,
-                           dynamically_generate_transforms=True):
+                           generate_transforms=None):
         if generate_transforms or (generate_transforms is None and self.lambda_ == 0):
-            _logger.info("Generating {} total transforms...".format(len(self.states) * n_transforms_per_walker))
-            current_layer = self.tree_layer()
-            new_layer = set()
-            new_states = []
-            new_transforms = []
+            _logger.info("Generating {} total transforms...".format(len(self.walkers) * n_transforms_per_walker))
+            new_walkers = []
 
-            for n, state in enumerate(self.states):
-                self.setState(state, self.simulation.context)
+            i = 0
+            for walker in self.walkers:
+                self.setState(walker)
                 transforms = self.moves.generateMoves(n_transforms_per_walker)
-                new_layer |= {_anytree.Node(i, parent=current_layer[n], lambda_=self.lambda_,
-                                            iteration=self.iteration, transform=True)
-                              for i in range(n * n_transforms_per_walker, (n + 1) * n_transforms_per_walker)}
+                for t in transforms:
+                    walker_new = _Walker(i, state=walker.state, lambda_=self.lambda_, iteration=self.iteration(),
+                                         transform=t, reporter_filename=walker.reporter_filename,
+                                         frame=walker.frame, logW=walker.logW, parent=walker)
+                    new_walkers += [walker_new]
+                    i += 1
 
-                if not dynamically_generate_transforms:
-                    state = self.simulation.context.getState(getPositions=True)
-                    for t in transforms:
-                        self.moves.applyMove(self.simulation.context, t)
-                        new_states += [self.simulation.context.getState(getPositions=True)]
-                        self.simulation.context.setState(state)
-                        new_transforms += [None]
-                else:
-                    new_states += [state]
-                    new_transforms += [transforms]
-
-            self.log_weights = self.log_weights[
-                sum([[i] * n_transforms_per_walker for i in range(len(self.states))], [])]
-            self.log_weights -= _logsumexp(self.log_weights)
-            self._all_tree_nodes |= new_layer
-            self.states = new_states
-            self.transforms = new_transforms
-        else:
-            self.transforms = [None] * len(self.states)
+            self.walkers = new_walkers
 
     def reweight(self,
                  resampling_metric=_resmetrics.WorstCaseSampleSize,
@@ -602,22 +625,18 @@ class GenericSMCSampler:
         if self.lambda_ == target_lambda:
             return
 
-        self._current_reduced_potentials = self.calculateStateEnergies(self.lambda_, transforms=self.transforms)
-        self._current_deltaEs = {}
-        self._current_weights = {}
+        if _inspect.isclass(resampling_metric):
+            resampling_metric = resampling_metric(self)
 
         # this is the function we are going to minimise
         def evaluateWeights(lambda_):
             new_lambda = float(max(min(1., lambda_), 0.))
-            self._new_reduced_potentials = self.calculateStateEnergies(new_lambda, transforms=self.transforms)
-            self._current_deltaEs[new_lambda] = self._new_reduced_potentials - self._current_reduced_potentials
-            self._current_weights[new_lambda] = _np.exp(
-                _np.nanmin(self._current_deltaEs[new_lambda]) - self._current_deltaEs[new_lambda])
-            self._current_weights[new_lambda][
-                self._current_weights[new_lambda] != self._current_weights[new_lambda]] = 0
-            self._current_weights[new_lambda] /= sum(self._current_weights[new_lambda])
+            deltaEs = self.calculateDeltaEs(new_lambda)
+            weights = _np.exp(_np.nanmin(deltaEs) - deltaEs)
+            weights[weights != weights] = 0
+            weights /= _np.sum(weights)
             if resampling_metric is not None:
-                val = resampling_metric.evaluate(self._current_weights[new_lambda])
+                val = resampling_metric(weights)
                 _logger.debug("Resampling metric {:.8g} at next lambda {:.8g}".format(val, new_lambda))
                 return val
 
@@ -636,13 +655,12 @@ class GenericSMCSampler:
         # evaluate next lambda value
         if resampling_metric is not None:
             if target_metric_value is None:
-                target_metric_value = resampling_metric.defaultValue()
+                target_metric_value = resampling_metric.defaultValue
             if target_metric_tol is None:
-                target_metric_tol = resampling_metric.defaultTol()
+                target_metric_tol = resampling_metric.defaultTol
 
             # minimise and set optimal lambda value adaptively if possible
-            length = sum(1 if x is None else len(x) for x in self.transforms)
-            current_y = resampling_metric.evaluate([1 / length] * length)
+            current_y = resampling_metric([1 / len(self.walkers)] * len(self.walkers))
             initial_guess_x = None if default_dlambda is None else self.lambda_ + default_dlambda
             next_lambda_ = _BisectingMinimiser.minimise(evaluateWeights, target_metric_value, self.lambda_,
                                                         target_lambda, minimum_x=minimum_lambda,
@@ -652,9 +670,7 @@ class GenericSMCSampler:
         else:
             # else use default_dlambda
             next_lambda_ = max(min(1., self.lambda_ + default_dlambda), 0.)
-            evaluateWeights(next_lambda_)
 
-        del self._current_reduced_potentials, self._current_weights
         if change_lambda:
             # update histories, lambdas, and partition functions
             self.lambda_ = next_lambda_
@@ -665,60 +681,47 @@ class GenericSMCSampler:
                  n_walkers=1000,
                  resampling_method=_resmethods.SystematicResampler,
                  exact_weights=False,
-                 weights=None,
-                 states=None,
-                 transforms=None,
-                 change_states=True):
+                 walkers=None,
+                 change_walkers=True):
         # prepare for resampling
-        if weights is None:
-            weights = _np.exp(self.log_weights)
-        if states is None:
-            states = self.states
-        if transforms is None:
-            transforms = self.transforms
-
-        indices = []
-        for i in range(len(self.states)):
-            if self.transforms[i] is None:
-                indices += [(i, None)]
-            else:
-                indices += [(i, j) for j in range(len(self.transforms[i]))]
+        if walkers is None:
+            walkers = self.walkers
+        new_walkers = walkers
 
         if resampling_method is not None:
+            # get weights
+            log_relative_weights = _np.asarray([0 if walker.logW is None else walker.logW for walker in walkers])
+            weights = _np.exp(log_relative_weights - _logsumexp(log_relative_weights))
+
             # resample
-            resampled_states = resampling_method.resample(indices, weights, n_walkers=n_walkers)[0]
-            _random.shuffle(resampled_states)
-            states = [states[x[0]] for x in resampled_states]
-            transforms = [None if x[1] is None else transforms[x[0]][x[1]] for x in resampled_states]
-            weights = weights[[indices.index(x) for x in resampled_states]]
+            indices = [i for i in range(len(walkers))]
+            resampled_indices = resampling_method.resample(indices, weights, n_walkers=n_walkers)[0]
+            _random.shuffle(resampled_indices)
 
-            # update the weights
-            log_weights = _np.log(weights)
+            logWs = _np.repeat(_logsumexp(log_relative_weights) - _np.log(len(walkers)), n_walkers)
             if exact_weights:
-                counts = _Counter(resampled_states)
-                n_resampled = [counts[x] for x in resampled_states]
-                log_weights -= _np.log(n_resampled)
-            else:
-                log_weights -= log_weights
-            log_weights -= _logsumexp(log_weights)
-            weights = _np.exp(log_weights)
-        else:
-            resampled_states = indices
-            log_weights = _np.log(weights)
+                counts = _Counter(resampled_indices)
+                n_resampled = _np.asarray([counts[x] for x in resampled_indices], dtype=_np.float32)
+                log_weights = _np.log(weights[resampled_indices]) - _np.log(n_resampled / _np.sum(n_resampled))
+                logWs += log_weights - _logsumexp(log_weights) + _np.log(log_weights.shape)
 
-        # update the object, if applicable
-        if change_states:
-            old_state_indices = [indices.index(x) for x in resampled_states]
-            current_iteraton = self.iteration if self.lambda_ else self.iteration - 1
-            current_nodes = self.tree_layer(lambda_=self.lambda_history[-2], iteration=current_iteraton)
-            self._all_tree_nodes |= {_anytree.Node(i_new, parent=current_nodes[i_old], lambda_=self.lambda_,
-                                                   transform=False, iteration=current_iteraton)
-                                     for i_new, i_old in enumerate(old_state_indices)}
-            self.log_weights = log_weights
-            self.states = states
-            self.transforms = transforms
+            new_walkers = [_Walker(i_new,
+                                   parent=walkers[i_old].parent,
+                                   state=walkers[i_old].state,
+                                   transform=walkers[i_old].transform,
+                                   reporter_filename=walkers[i_old].reporter_filename,
+                                   frame=walkers[i_old].frame,
+                                   lambda_=self.lambda_,
+                                   iteration=self.iteration(),
+                                   logW=logWs[i_new])
+                           for i_new, i_old in enumerate(resampled_indices)]
 
-        return weights, states, transforms, resampled_states
+            # update the object, if applicable
+            if change_walkers:
+                self._all_walkers = [x for x in self._all_walkers if x not in walkers]
+                self.walkers = new_walkers
+
+        return new_walkers
 
     def runSingleIteration(self,
                            sampling_metric=_sammetrics.EnergyCorrelation,
@@ -737,7 +740,6 @@ class GenericSMCSampler:
                            n_walkers=1000,
                            generate_transforms=None,
                            n_transforms_per_walker=100,
-                           dynamically_generate_transforms=True,
                            keep_walkers_in_memory=False,
                            write_checkpoint=None,
                            load_checkpoint=None):
@@ -782,9 +784,6 @@ class GenericSMCSampler:
             False doesn't generate any transforms.
         n_transforms_per_walker : int
             How many transforms to generate for each walker. Only used if generate_transforms is not False or None.
-        dynamically_generate_transforms : bool
-            Whether to store the extra transforms as states or as transformations. The former is much faster, but also
-            extremely memory-intensive. Only set to False if you are certain that you have enough memory.
         keep_walkers_in_memory : bool
             Whether to keep the walkers as states or load them dynamically from the hard drive. The former is much
             faster during the energy evaluation step but is more memory-intensive. Only set to True if you are certain
@@ -856,7 +855,6 @@ class GenericSMCSampler:
             self.generateTransforms(
                 n_transforms_per_walker=n_transforms_per_walker,
                 generate_transforms=generate_transforms,
-                dynamically_generate_transforms=dynamically_generate_transforms
             )
 
             # return if final decorrelation
@@ -873,7 +871,7 @@ class GenericSMCSampler:
                                                                                         next_lambda))
                 else:
                     sampling_metric.evaluateAfter()
-                    _logger.debug("Sampling metric {:.8g} ".format(sampling_metric.metric))
+                    _logger.debug("Sampling metric {:.8g}".format(sampling_metric.metric))
                 if not sampling_metric.terminateSampling and elapsed_steps < maximum_decorrelation_steps:
                     continue
                 sampling_metric.reset()
@@ -899,7 +897,8 @@ class GenericSMCSampler:
         # dump info to logger
         _logger.info("Sampling at lambda = {:.8g} terminated after {} steps per walker".format(self.lambda_history[-2],
                                                                                                elapsed_steps))
-        _logger.info("Trajectory path: \"{}\"".format(self.current_trajectory_filename))
+        if self.current_trajectory_filename is not None:
+            _logger.info("Trajectory path: \"{}\"".format(self.current_trajectory_filename))
         _logger.info("Current accumulated logZ: {:.8g}".format(self.logZ))
         _logger.info("Next lambda: {:.8g}".format(self.lambda_))
 
@@ -913,6 +912,7 @@ class GenericSMCSampler:
             force_constant=5.0 * _unit.kilocalories_per_mole / _unit.angstroms ** 2,
             output_interval=100000,
             final_decorrelation_step=True,
+            target_lambda=1,
             **kwargs):
         """
         Performs a complete sequential Monte Carlo run until lambda = 1.
@@ -925,7 +925,7 @@ class GenericSMCSampler:
             The number of equilibration steps per equilibration.
         restrain_backbone : bool
             Whether to restrain all atoms with the following names: 'CA', 'C', 'N'.
-        restrain_resnames : list
+        restrain_resnames : list, False
             A list of residue names to restrain. Default is: ["UNL", "LIG"]
         restrain_alchemical_atoms : bool, None
             True restrains all alchemical atoms, False removes restraints from all alchemical atoms and None has no
@@ -936,18 +936,29 @@ class GenericSMCSampler:
             How often to output to a trajectory file.
         final_decorrelation_step : bool
             Whether to decorrelate the final resampled walkers for another number of default_decorrelation_steps.
+        target_lambda : float
+            What the final intended lambda value is.
         args
             Positional arguments to be passed to runSingleIteration().
         kwargs
             Keyword arguments to be passed to runSingleIteration().
         """
+        kwargs["target_lambda"] = target_lambda
+        direction = _np.sign(target_lambda - self.lambda_)
+
         def runOnce():
             self.runSingleIteration(*args, **kwargs)
             if "load_checkpoint" in kwargs.keys():
                 kwargs.pop("load_checkpoint")
 
+        # TODO: fix equilibration
         if self.lambda_ == 0 and not self.initialised:
-            for _ in range(n_equilibrations):
+            if output_interval:
+                assert equilibration_steps % output_interval == 0, "The equilibration steps must be a multiple of " \
+                                                                   "the output interval"
+            frame_step = equilibration_steps // output_interval if output_interval else None
+            self.walkers = []
+            for i in range(n_equilibrations):
                 old_state = self.simulation.context.getState(getPositions=True)
                 self.equilibrate(equilibration_steps=equilibration_steps,
                                  restrain_backbone=restrain_backbone,
@@ -955,17 +966,21 @@ class GenericSMCSampler:
                                  restrain_alchemical_atoms=restrain_alchemical_atoms,
                                  force_constant=force_constant,
                                  output_interval=output_interval)
-                self.states += [self.simulation.context.getState(getPositions=True, getEnergy=True)]
+                self.walkers += [_Walker(i,
+                                         parent=self.walker_tree.root,
+                                         state=self.simulation.context.getState(getPositions=True, getEnergy=True),
+                                         reporter_filename=self.current_trajectory_filename,
+                                         frame=(i + 1) * frame_step - 1) if frame_step is not None else None]
                 self.setState(old_state, self.simulation.context)
-            self.transforms = [None] * n_equilibrations
-            self.log_weights = _np.log([1 / n_equilibrations] * n_equilibrations)
 
-        while self.lambda_ < 1:
+        initial_sampling_steps = self.total_sampling_steps
+        while _np.sign(target_lambda - self.lambda_) == direction != 0:
             runOnce()
         if final_decorrelation_step:
             runOnce()
-        total_sampling_time = self.total_sampling_steps * self.integrator.getStepSize().in_units_of(_unit.nanosecond)
-        _logger.info("Total simulation time was {}".format(total_sampling_time))
+        sampling_step_difference = self.total_sampling_steps - initial_sampling_steps
+        total_sampling_time = sampling_step_difference * self.integrator.getStepSize().in_units_of(_unit.nanosecond)
+        _logger.info("The SMC run cycle finished in {}".format(total_sampling_time))
 
     def generateAlchemicalRegion(self):
         """Makes sure that all rotated dihedrals are also made alchemical."""
