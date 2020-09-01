@@ -4,10 +4,10 @@ import math as _math
 import random as _random
 
 import numpy as _np
-import pymbar as _pymbar
 import simtk.unit as _unit
 
 from .generic import GenericSMCSampler as _GenericSMCSampler
+import slicer.fe_estimators as _fe_estimators
 import slicer.resampling_methods as _resmethods
 
 _logger = _logging.getLogger(__name__)
@@ -17,15 +17,16 @@ class CyclicSMCSampler(_GenericSMCSampler):
     # TODO: correctly reweight adaptive walkers
     # TODO: make pickle work
     _picklable_attrs = _GenericSMCSampler._picklable_attrs + ["target_lambda", "N_opt", "adaptive_mode",
-                                                              "sampling_history", "_deltaE_memo", "_FE_memo"]
+                                                              "sampling_history", "fe_estimator"]
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, fe_estimator=_fe_estimators.EqualMetropolis, **kwargs):
         self.target_lambda = 1
         self.N_opt = None
         self.adaptive_mode = True
         self.sampling_history = []
-        self._deltaE_memo = {}
-        self._FE_memo = {}
+        if not issubclass(fe_estimator, _fe_estimators.AbstractFEEstimator):
+            raise TypeError("The free energy estimator must be inherited from the abstract base class")
+        self.fe_estimator = fe_estimator(self)
         super().__init__(*args, **kwargs)
 
     def walker_filter(self, lambda_, **kwargs):
@@ -40,46 +41,6 @@ class CyclicSMCSampler(_GenericSMCSampler):
     def target_lambda(self, val):
         assert val in [0, 1], "The target lambda must be one of the terminal lambda states"
         self._target_lambda = val
-
-    def get_BAR_free_energy(self, lambda1, lambda0, **kwargs):
-        # TODO: correctly calculate FE's from weighted walkers
-        # TODO: possibly use FastMBAR
-
-        def isclose(x, y): return all(_math.isclose(*items) for items in zip(x, y))
-        keys = {"fwd": (lambda1, lambda0), "bwd": (lambda0, lambda1)}
-        works = {}
-
-        for label, key in keys.items():
-            # preliminary checks
-            if not any(isclose(key, x) for x in self._deltaE_memo.keys()):
-                self._deltaE_memo[key] = [[], 0]
-            else:
-                key = next(x for x in self._deltaE_memo.keys() if isclose(key, x))
-
-            # only get the uncached walkers
-            min_iter = self._deltaE_memo[key][-1]
-            walkers = [w for w in self._all_walkers if w.lambda_ is not None and _math.isclose(w.lambda_, key[-1])
-                       and w.iteration >= min_iter]
-
-            # update the cache
-            self._deltaE_memo[key][0] += list(self.calculateDeltaEs(*key, walkers))
-            works[label] = _np.asarray(self._deltaE_memo[key][0])
-            if len(walkers):
-                self._deltaE_memo[key][-1] = max(x.iteration for x in walkers) + 1
-
-        # retrieve cached free energy and run BAR
-        kwargs["DeltaF"] = 0.
-        if (lambda1, lambda0) in self._FE_memo.keys():
-            kwargs["DeltaF"] = self._FE_memo[(lambda1, lambda0)]
-        kwargs["method"] = "self-consistent-iteration"
-        kwargs["compute_uncertainty"] = False
-        fe = _pymbar.bar.BAR(works["fwd"], works["bwd"], **kwargs)
-
-        # update the free energy cache
-        self._FE_memo[keys["fwd"]] = fe
-        self._FE_memo[keys["bwd"]] = -fe
-
-        return fe
 
     def sample(self, *args, reporter_filename=None, **kwargs):
         if reporter_filename is None:
@@ -103,7 +64,7 @@ class CyclicSMCSampler(_GenericSMCSampler):
         next_lambda = self.lambda_history[(idx + sign)]
 
         # get acceptance criterion
-        fe_fwd = self.get_BAR_free_energy(next_lambda, self.lambda_)
+        fe_fwd = self.fe_estimator(next_lambda, self.lambda_)
         deltaEs_fwd = self.calculateDeltaEs(next_lambda, self.lambda_)
         acc_fwd = min(1., _np.average(_np.exp(-deltaEs_fwd + fe_fwd)))
         _logger.debug("Forward probability: {}".format(acc_fwd))
@@ -112,7 +73,7 @@ class CyclicSMCSampler(_GenericSMCSampler):
         randnum = _random.random()
         if acc_fwd != 1. and randnum >= acc_fwd:
             if not _math.isclose(next_lambda, prev_lambda):
-                fe_bwd = self.get_BAR_free_energy(prev_lambda, self.lambda_)
+                fe_bwd = self.fe_estimator(prev_lambda, self.lambda_)
                 deltaEs_bwd = self.calculateDeltaEs(prev_lambda, self.lambda_)
                 acc_bwd = max(0., min(1., _np.average(_np.exp(-deltaEs_bwd + fe_bwd))) - acc_fwd)
                 _logger.debug("Backward probability: {}".format(acc_bwd))
@@ -202,7 +163,7 @@ class CyclicSMCSampler(_GenericSMCSampler):
             current_cycle += 1
 
         lambdas = self.lambda_history[:self.lambda_history.index(1) + 1]
-        fe = sum(self.get_BAR_free_energy(lambdas[i + 1], lambdas[i]) for i in range(len(lambdas) - 1))
+        fe = sum(self.fe_estimator(lambdas[i + 1], lambdas[i]) for i in range(len(lambdas) - 1))
         _logger.info("Grand total simulation time was {}".format(dt))
         _logger.info("Final dimensionless free energy difference (-logZ) between lambda = 0 and lambda = 1 is: {}".
                      format(fe))
