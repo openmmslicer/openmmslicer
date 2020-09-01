@@ -1,4 +1,5 @@
 # TODO: update docstrings
+from . import fe_estimators
 from . import moves
 from . import reporters
 from . import resampling_metrics
