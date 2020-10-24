@@ -1,5 +1,7 @@
 # TODO: update docstrings
+from . import alchemy
 from . import fe_estimators
+from . import mbar
 from . import moves
 from . import reporters
 from . import resampling_metrics
