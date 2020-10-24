@@ -116,7 +116,7 @@ class GenericSMCSampler:
         self.generateAlchemicalRegion()
         if "alchemical_torsions" not in alch_config.keys():
             alch_config["alchemical_torsions"] = self._alchemical_dihedral_indices
-        self.alch_system = GenericSMCSampler.generateAlchSystem(self.system, self.alchemical_atoms, **alch_config)
+        self.alch_system = self.generateAlchSystem(self.system, self.alchemical_atoms, **alch_config)
         if npt:
             self.alch_system = self.addBarostat(self.alch_system, temperature=integrator.getTemperature())
 
@@ -1001,6 +1001,7 @@ class GenericSMCSampler:
     @staticmethod
     def generateAlchSystem(system,
                            atom_indices,
+                           alchemical_factory=_openmmtools.alchemy.AbsoluteAlchemicalFactory,
                            softcore_alpha=0.5,
                            softcore_a=1,
                            softcore_b=1,
@@ -1078,7 +1079,7 @@ class GenericSMCSampler:
             _logging.getLogger("openmmtools.alchemy").setLevel(_logging.ERROR)
 
         # Disabled correction term due to increased computational cost
-        factory = _openmmtools.alchemy.AbsoluteAlchemicalFactory(
+        factory = alchemical_factory(
             disable_alchemical_dispersion_correction=disable_alchemical_dispersion_correction,
             alchemical_pme_treatment=alchemical_pme_treatment)
         alch_region = _openmmtools.alchemy.AlchemicalRegion(
