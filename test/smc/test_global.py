@@ -16,9 +16,11 @@ def test_expectedRoundTripTime():
         [.3, .2, .1, .4],
         [0., .6, .3, .1],
     ])
-    assert isclose(GlobalAdaptiveCyclicSMCSampler.expectedRoundTripTime(obj, [0.] * 3), 10.646234070290262)
+    obj.expectedTransitionTime.side_effect = lambda *args, **kwargs: \
+        GlobalAdaptiveCyclicSMCSampler.expectedTransitionTime(obj, *args, **kwargs)
+    assert isclose(GlobalAdaptiveCyclicSMCSampler.expectedRoundTripTime(obj, [0, 0.5, 1]), 10.646234070290262)
     obj.expectedTransitionMatrix.return_value = obj.expectedTransitionMatrix()[::-1, ::-1]
-    assert isclose(GlobalAdaptiveCyclicSMCSampler.expectedRoundTripTime(obj, [0.] * 3), 10.646234070290262)
+    assert isclose(GlobalAdaptiveCyclicSMCSampler.expectedRoundTripTime(obj, [0, 0.5, 1]), 10.646234070290262)
 
 
 def test_continuous_optimise_protocol():
@@ -31,18 +33,22 @@ def test_continuous_optimise_protocol():
         obj, *args, **kwargs)
     obj._augment_fixed_lambdas.return_value = []
     obj.lambda_ = 0.
-    x, y = GlobalAdaptiveCyclicSMCSampler._continuous_optimise_protocol(obj, 5, maxfevals=1000000, tol=1e-16)
+    obj.significant_lambda_figures = None
+    x, y, success = GlobalAdaptiveCyclicSMCSampler._continuous_optimise_protocol(obj, 5, maxfevals=1000000, tol=1e-16)
+    assert success
     assert np.sum(np.isclose(x, 0.44)) == 5
     assert np.isclose(y, 0)
 
     obj._augment_fixed_lambdas.return_value = [0., 0.33, 0.88, 1.0]
-    x, y = GlobalAdaptiveCyclicSMCSampler._continuous_optimise_protocol(obj, 2, maxfevals=1000000, tol=1e-16)
+    x, y, success = GlobalAdaptiveCyclicSMCSampler._continuous_optimise_protocol(obj, 2, maxfevals=1000000, tol=1e-16)
+    assert success
     assert len(x) == 6
     assert np.sum(np.isin(x, obj._augment_fixed_lambdas.return_value)) == 4
     assert np.sum(np.isclose(x, 0.44)) == 2
     assert np.isclose(obj.expectedRoundTripTime.side_effect(np.asarray(x)), y)
 
-    x, y = GlobalAdaptiveCyclicSMCSampler._continuous_optimise_protocol(obj, 0, maxfevals=1000000, tol=1e-16)
+    x, y, success = GlobalAdaptiveCyclicSMCSampler._continuous_optimise_protocol(obj, 0, maxfevals=1000000, tol=1e-16)
+    assert success
     assert len(x) == 4
     assert np.sum(np.isin(x, obj._augment_fixed_lambdas.return_value)) == 4
     assert np.isclose(obj.expectedRoundTripTime.side_effect(np.asarray(x)), y)
@@ -51,14 +57,16 @@ def test_continuous_optimise_protocol():
 def test_discrete_optimise_protocol():
     obj = Mock()
     obj._augment_fixed_lambdas.return_value = []
-    obj._continuous_optimise_protocol.side_effect = lambda x, **kwargs: (int(x), int(x) ** 2 - 8 * int(x))
+    obj._continuous_optimise_protocol.side_effect = lambda x, **kwargs: (int(x), int(x) ** 2 - 8 * int(x), True)
 
     obj.current_lambdas = [0.]
-    x, y = GlobalAdaptiveCyclicSMCSampler._discrete_optimise_protocol(obj)
+    x, y, success = GlobalAdaptiveCyclicSMCSampler._discrete_optimise_protocol(obj)
+    assert success
     assert x == 4
     assert y == -16
 
     obj.current_lambdas = [0.] * 10
-    x, y = GlobalAdaptiveCyclicSMCSampler._discrete_optimise_protocol(obj)
+    x, y, success = GlobalAdaptiveCyclicSMCSampler._discrete_optimise_protocol(obj)
+    assert success
     assert x == 4
     assert y == -16
