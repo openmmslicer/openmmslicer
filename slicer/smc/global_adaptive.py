@@ -77,7 +77,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
 
     @current_lambdas.setter
     def current_lambdas(self, val):
-        self._current_lambdas = sorted({x for x in set(val) if 0 <= x <= 1} | {0., 0.5, 1., self.lambda_})
+        self._current_lambdas = sorted({x for x in set(val) if 0 <= x <= 1} | {0., 1., self.lambda_})
 
     @property
     def effective_lambda_bounds(self):
@@ -414,7 +414,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
     def _closest_protocol(self, n, fixed_lambdas=None):
         if fixed_lambdas is None:
             fixed_lambdas = []
-        fixed_lambdas = sorted(set(fixed_lambdas) | {0., 1., 0.5, self.lambda_})
+        fixed_lambdas = sorted(set(fixed_lambdas) | {0., 1., self.lambda_})
         if n in self._protocol_memo.keys():
             protocol = self._protocol_memo[n]
         elif any(k for k in self._protocol_memo.keys() if k > n):
@@ -431,7 +431,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
     def _augment_fixed_lambdas(self, fixed_lambdas=None, start=0., end=1.):
         if fixed_lambdas is None:
             fixed_lambdas = []
-        fixed_lambdas = set(fixed_lambdas) | {x for x in self.current_lambdas if not start < x < end} | {self.lambda_, 0.5}
+        fixed_lambdas = set(fixed_lambdas) | {x for x in self.current_lambdas if not start < x < end} | {self.lambda_}
         return sorted(fixed_lambdas)
 
     def _continuous_optimise_protocol(self, n_opt, fixed_lambdas=None, start=0., end=1., tol=1e-3, **kwargs):
@@ -569,9 +569,9 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
                     kwargs[key] = _np.sign(kwargs[key]) * max(minimum_value, round(abs(kwargs[key]),
                                                                                    self.significant_lambda_figures))
             if "fixed_lambdas" not in kwargs.keys() or kwargs["fixed_lambdas"] is None:
-                kwargs["fixed_lambdas"] = [0.5]
+                kwargs["fixed_lambdas"] = []
             else:
-                kwargs["fixed_lambdas"] = sorted(set(kwargs["fixed_lambdas"]) | {0.5})
+                kwargs["fixed_lambdas"] = sorted(set(kwargs["fixed_lambdas"]))
         super().runSingleIteration(*args, **kwargs)
 
     def _runPostAdaptiveIteration(self, optimise_kwargs=None, **kwargs):
