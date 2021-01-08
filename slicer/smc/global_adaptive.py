@@ -478,7 +478,8 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             f0 = f(x0)
             kwargs = {**dict(verb_log=False, verb_log_expensive=False, bounds=([x_start] * N, [x_end] * N),
                              maxfevals=10 * N, tolfun=tol), **kwargs}
-            sigma0 = (x_end - x_start) / (N_internal - 2)
+            # we bound in case of slight numerical overflows
+            sigma0 = min((x_end - x_start) / (N_internal - 2), 0.99)
 
             stdout, stderr = _sys.stdout.write, _sys.stderr.write
             _sys.stdout.write, _sys.stderr.write = _logger.debug, _logger.error
