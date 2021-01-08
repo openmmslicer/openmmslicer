@@ -369,29 +369,32 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
 
         return T
 
-    def expectedTransitionTime(self, lambda0, lambda1, lambdas, *args, costs=None, **kwargs):
+    def expectedTransitionTime(self, lambdas, *args, lambda0=0., lambda1=1., target0=1, target1=0, costs=None,
+                               transition_matrix=None, **kwargs):
         lambdas = _np.asarray(lambdas)
         lambdas[lambdas < 0] = 0.
         lambdas[lambdas > 1] = 1.
         idx0, idx1 = _np.where(lambdas == lambda0)[0][0], _np.where(lambdas == lambda1)[0][0]
-        if idx1 > idx0:
-            i, j = max(0, 2 * idx0 - 1), min(2 * idx1, 2 * lambdas.shape[0] - 3)
-        elif idx1 < idx0:
-            i, j = min(2 * idx0, 2 * lambdas.shape[0] - 3), max(0, 2 * idx1 - 1)
-        else:
+        if idx0 == idx1:
             return 0.
+        i = max(0, 2 * idx0 - 1) if target0 == 0 else min(2 * idx0, 2 * lambdas.shape[0] - 3)
+        j = max(0, 2 * idx1 - 1) if target1 == 0 else min(2 * idx1, 2 * lambdas.shape[0] - 3)
 
-        T = self.expectedTransitionMatrix(lambdas, *args, **kwargs)
-        T_del = _np.delete(_np.delete(T, i, axis=0), i, axis=1)
+        if transition_matrix is None:
+            transition_matrix = self.expectedTransitionMatrix(lambdas, *args, **kwargs)
+        else:
+            if not (transition_matrix.shape[0] == transition_matrix.shape[1] == 2 * (lambdas.size - 1)):
+                raise ValueError("Invalid transition matrix shape supplied")
+        transition_matrix_del = _np.delete(_np.delete(transition_matrix, i, axis=0), i, axis=1)
         if costs is None:
             costs = [self.decorrelationSteps(lambda_) for lambda_ in lambdas]
-        costs = _np.asarray([costs[0]] + [x for x in costs[1:-1] for _ in range(2)] + [costs[1]])
-        identity = _np.identity(T_del.shape[0])
-        b = _np.delete(T @ costs, i, axis=0)
+        costs = _np.asarray([costs[0]] + [x for x in costs[1:-1] for _ in range(2)] + [costs[-1]])
+        identity = _np.identity(transition_matrix_del.shape[0])
+        b = _np.delete(transition_matrix @ costs, i, axis=0)
         j = j if j < i else j - 1
 
         try:
-            tau = _np.linalg.solve(identity - T_del, b)[j]
+            tau = _np.linalg.solve(identity - transition_matrix_del, b)[j]
             if tau < 0:
                 tau = _np.inf
         except _np.linalg.LinAlgError:
@@ -399,9 +402,10 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
 
         return tau
 
-    def expectedRoundTripTime(self, lambdas, *args, costs=None, lambda0=0., lambda1=1., **kwargs):
-        tau_fwd = self.expectedTransitionTime(lambda0, lambda1, lambdas, *args, costs=costs, **kwargs)
-        tau_bwd = self.expectedTransitionTime(lambda1, lambda0, lambdas, *args, costs=costs, **kwargs)
+    def expectedRoundTripTime(self, *args, lambda0=0., lambda1=1., **kwargs):
+        lambda0, lambda1 = min(lambda0, lambda1), max(lambda0, lambda1)
+        tau_fwd = self.expectedTransitionTime(*args, lambda0=lambda0, lambda1=lambda1, target0=1, target1=0, **kwargs)
+        tau_bwd = self.expectedTransitionTime(*args, lambda0=lambda1, lambda1=lambda0, target0=0, target1=1, **kwargs)
         tau_total = tau_bwd + tau_fwd
         return tau_total
 
