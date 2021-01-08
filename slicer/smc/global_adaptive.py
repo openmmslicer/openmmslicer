@@ -299,7 +299,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
     def fe_estimator(self, val):
         pass
 
-    def effectiveDecorrelationTime(self, recalculate=False):
+    def effectiveDecorrelationTime(self):
         lambdas = self.lambda_history[self.lambda_history.index(1):]
         n_lambdas = len(lambdas)
         min_lambda = [x for x in self.current_lambdas if x <= min(lambdas)][-1]
@@ -307,28 +307,25 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             return 0.
         max_lambda = [x for x in self.current_lambdas if x >= max(lambdas[lambdas.index(min(lambdas)):])][0]
 
-        calculate = False
-        if recalculate or self._next_tau_calculation is None or self._next_tau_calculation <= len(self.lambda_history) or self._tau_memo[0] != (min_lambda, max_lambda):
-            calculate = True
-            self._next_tau_calculation = len(self.lambda_history) + self.freq_opt
+        if self._decorr_memo is None or not set(self._decorr_memo[0]).issuperset({min_lambda, max_lambda}):
+            mbar = self.MBAR(recalculate=True, decorrelate=False)[-1]
+            transition_matrix = self.expectedTransitionMatrix(self.current_lambdas, mbar)
+            self._decorr_memo = self.current_lambdas, transition_matrix
 
-        if calculate:
-            mbars = self.MBAR(recalculate=True, decorrelate=False)[-1]
-            costs = [0.5] + [1] * (len(self.current_lambdas) - 2) + [0.5]
-            tau_bwd = self.expectedTransitionTime(1, min_lambda, self.current_lambdas, mbars, costs=costs)
-            tau_fwd = self.expectedTransitionTime(min_lambda, max_lambda, self.current_lambdas, mbars, costs=costs)
-            tau_total = tau_bwd + tau_fwd
-            self._tau_memo = (min_lambda, max_lambda), tau_total
-        else:
-            tau_total = self._tau_memo[-1]
+        costs = [1] * len(self._decorr_memo[0])
+        tau_bwd = self.expectedTransitionTime(self._decorr_memo[0], lambda0=1, lambda1=min_lambda, costs=costs,
+                                              target0=0, target1=1, transition_matrix=self._decorr_memo[1])
+        tau_fwd = self.expectedTransitionTime(self._decorr_memo[0], lambda0=min_lambda, lambda1=max_lambda, costs=costs,
+                                              target0=1, target1=0, transition_matrix=self._decorr_memo[1])
+        tau_total = tau_bwd + tau_fwd
 
         if tau_total and not _np.isinf(tau_total):
             decorrelation_time = n_lambdas / (tau_total * max(self.cycles, 1))
-            if calculate:
-                _logger.debug(f"Relative effective decorrelation time is {decorrelation_time}")
-            return decorrelation_time
+            _logger.debug(f"Relative effective decorrelation time is {decorrelation_time}")
         else:
-            return 0.
+            decorrelation_time = 0.
+
+        return decorrelation_time
 
     def expectedTransitionMatrix(self, lambdas, mbar):
         if len(lambdas) < 2:
@@ -528,6 +525,10 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
 
             self.MBAR(recalculate=True, n_bootstraps=self.n_bootstraps_opt, decorrelate=self.decorrelate_opt,
                       n_decorr=self.n_decorr_opt)
+            if self.decorrelate_opt:
+                tau = self.effectiveDecorrelationTime()
+                max_distance = max(1, round(float(tau)))
+                effective_sample_size = len(self.lambda_history) // max_distance
 
             protocol, fun, success = self._discrete_optimise_protocol(start=start, end=end, **kwargs)
             if _np.isinf(fun) or _np.isnan(fun) or not success:
