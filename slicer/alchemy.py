@@ -30,12 +30,12 @@ class AbsoluteAlchemicalGaussianSoftcoreFactory(_alchemy.AbsoluteAlchemicalFacto
         sterics_mixing_rules = ('epsilon = sqrt(epsilon1*epsilon2);'  # Mixing rule for epsilon.
                                 'sigma = 0.5*(sigma1 + sigma2);')  # Mixing rule for sigma.
 
-        # Soft-core Lennard-Jones.
+        # Soft-core Lennard-Jones. 0.89089871814 = 2^-6 and is related to the minimal distance.
         exceptions_sterics_energy_expression = ('U_sterics;'
                                                 'U_sterics = U_real+U_alch;'
                                                 'U_real = max(2.0*{0}-1.0,0.0)*4*epsilon*x*(x-1.0);'
                                                 'U_alch = (1.0-2.0*abs({0}-0.5))*softcore_a*exp(-softcore_b*y);'
-                                                'y = (r/sigma)^softcore_c;'
+                                                'y = (0.89089871814*r/sigma)^softcore_c;'
                                                 'x = (sigma/r)^6;').format(lambda_variable_name)
 
         # Define energy expression for electrostatics.
