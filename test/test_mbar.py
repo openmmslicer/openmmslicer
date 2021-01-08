@@ -20,8 +20,8 @@ def test_MBARResult():
 
     # test correctness of the bootstrapped FE calculation
     indices = [1, 4, 4, 2]
-    mbar = MBARResult(u_kn, N_k, bootstrapped_indices=indices)
-    mbar_scrambled = MBARResult(u_kn, N_k, bootstrapped_indices=[4, 4, 1, 2])
+    mbar = MBARResult(u_kn, N_k, train_indices=indices)
+    mbar_scrambled = MBARResult(u_kn, N_k, train_indices=[4, 4, 1, 2])
     assert np.isclose(mbar.getFreeEnergyDifferences()[-1], 39.313316716289265)
     assert np.sum(mbar.getFreeEnergyDifferences() == mbar_scrambled.getFreeEnergyDifferences()) == 2
 
