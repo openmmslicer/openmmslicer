@@ -1,14 +1,12 @@
 import math as _math
 
-import anytree as _anytree
 
-
-class Walker(_anytree.Node):
+class Walker:
     _reset_cache_triggers = ["state", "lambda_", "transform", "reporter_filename", "frame"]
 
-    def __init__(self, *args, state=None, lambda_=None, iteration=None, transform=None, reporter_filename=None,
+    def __init__(self, name, state=None, lambda_=None, iteration=None, transform=None, reporter_filename=None,
                  frame=None, logW=None, **kwargs):
-        super().__init__(*args, **kwargs)
+        self.name = name
         self.state = state
         self.lambda_ = lambda_
         self.iteration = iteration
@@ -17,6 +15,7 @@ class Walker(_anytree.Node):
         self.frame = frame
         self.logW = logW
         self._energy_cache = {}
+        self.__dict__.update(kwargs)
 
     def __setattr__(self, key, value):
         if key in self._reset_cache_triggers:

@@ -1,4 +1,3 @@
-anytree
 cma
 mdtraj
 numpy
