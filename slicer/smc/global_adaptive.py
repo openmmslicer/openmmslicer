@@ -27,14 +27,14 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
     default_pymbar_kwargs = dict(solver_protocol=(dict(method=None, tol=1e-8, options=dict(maximum_iterations=100)),))
 
     def __init__(self, *args, n_bootstraps_fe=1, n_bootstraps_opt=1, decorrelate_fe=True, decorrelate_opt=True,
-                 n_decorr_fe=1, n_decorr_opt=10, freq_update_fe=1, freq_opt=100, significant_lambda_figures=2,
-                 pymbar_kwargs=None, **kwargs):
-        if "alchemical_functions" in kwargs.keys():
+                 n_decorr_fe=10, n_decorr_opt=10, min_update_fe=1, min_update_opt=100, freq_update_fe=0.01, freq_opt=0.1,
+                 significant_lambda_figures=2, pymbar_kwargs=None, **kwargs):
+        if "alchemical_functions" in kwargs.keys() and kwargs["alchemical_functions"] is not None:
             _warnings.warn("Custom alchemical functions are not supported. Switching to the defaults...")
+        kwargs["alchemical_functions"] = GlobalAdaptiveCyclicSMCSampler.default_alchemical_functions
         if "fe_estimator" in kwargs.keys():
             _warnings.warn("Custom free energy estimators are not supported. Switching to MBAR...")
             kwargs.pop("fe_estimator")
-        kwargs["alchemical_functions"] = GlobalAdaptiveCyclicSMCSampler.default_alchemical_functions
         super().__init__(*args, **kwargs)
         if pymbar_kwargs is None:
             pymbar_kwargs = {}
@@ -45,16 +45,17 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         self.decorrelate_opt = decorrelate_opt
         self.n_decorr_fe = n_decorr_fe
         self.n_decorr_opt = n_decorr_opt
+        self.min_update_fe = min_update_fe
+        self.min_update_opt = min_update_opt
         self.freq_update_fe = freq_update_fe
         self.freq_opt = freq_opt
         self.significant_lambda_figures = significant_lambda_figures
         # TODO: clean up memos
         self._next_optimisation = None
-        self._next_fe_calculation = None
         self._next_tau_calculation = None
         self._last_memo_update = 0
-        self._fe_memo = None
-        self._tau_memo = None
+        self._fe_memo = {}
+        self._decorr_memo = None
         self._interpol_memo = _collections.defaultdict(lambda: {
             0.: [],
             0.5: [],
@@ -204,15 +205,9 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
 
     def MBAR(self, recalculate=False, start=0., end=1., n_bootstraps=None, decorrelate=True, n_decorr=None, **kwargs):
         kwargs = {**self.pymbar_kwargs, **kwargs}
-        if self._next_fe_calculation is None:
-            decorrelate = False
+        key = (start, end)
 
-        calculate = False
-        if recalculate or self._next_fe_calculation is None or self._next_fe_calculation <= len(self.lambda_history):
-            calculate = True
-            self._next_fe_calculation = len(self.lambda_history) + self.freq_update_fe
-
-        if calculate:
+        if recalculate or key not in self._fe_memo or self._fe_memo[key][0] <= len(self.lambda_history):
             # initialise all data needed for MBAR
             lambdas = _np.asarray(self.unique_lambdas)
             u_kn = self.energyMatrix()
@@ -231,9 +226,11 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
 
             # get initial free energy estimates from previous calls to MBAR
             try:
-                old_fes = self._fe_memo[-1][0].computePerturbedFreeEnergies(u_kn, memo_key=tuple(lambdas))
+                indices = self._time_to_mbar_indices([list(range(len(self.lambda_history)))])[0][:self._fe_memo[key][-1][0]._u_kn.shape[1]]
+                u_kn_test = u_kn[:, _np.sort(indices)]
+                old_fes = self._fe_memo[key][-1][0].computePerturbedFreeEnergies(u_kn_test, memo_key=tuple(lambdas))
                 kwargs["initial_f_k"] = old_fes - old_fes[0]
-            except (TypeError, AttributeError):
+            except (KeyError, AttributeError, TypeError):
                 pass
 
             mbars = []
@@ -269,9 +266,16 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             for mbar in mbars:
                 if mbar is not None:
                     mbar.computePerturbedFreeEnergies(u_kn_pert, memo_key=tuple(self.current_lambdas))
-            self._fe_memo = self.current_lambdas, mbars
 
-        return self._fe_memo
+            # update cache
+            effective_sample_size = len(self.lambda_history)
+            if decorrelate:
+                effective_sample_size //= max_distance
+            increment = self.min_update_fe + round(effective_sample_size * (self.freq_update_fe))
+            next_fe_calculation = len(self.lambda_history) + increment
+            self._fe_memo[key] = next_fe_calculation, self.current_lambdas, mbars
+
+        return self._fe_memo[key][1:]
 
     @property
     def fe_estimator(self):
@@ -281,8 +285,9 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             kwargs = {**kwargs_default, **kwargs}
             lambdas, mbars = self.MBAR(**kwargs)
             if not set(lambdas).issuperset({lambda0, lambda1}):
+                self._fe_memo = {}
                 kwargs["recalculate"] = True
-                lambdas, mbars = self.MBAR(start=min(lambda0, lambda1), end=max(lambda0, lambda1), **kwargs)
+                lambdas, mbars = self.MBAR(**kwargs)
             memo_key = tuple(lambdas)
             fes = []
             for mbar in mbars:
@@ -514,11 +519,9 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         return protocol_curr, fun_curr, success
 
     def optimiseProtocol(self, start=None, end=None, **kwargs):
+        effective_sample_size = len(self.lambda_history)
         if self._next_optimisation is None:
             self.current_lambdas = self.lambda_history[:self.lambda_history.index(1) + 1]
-            self._next_optimisation = len(self.lambda_history) + self.freq_opt
-            self._prev_optimisation_index = len(self.lambda_history)
-            self._optimisation_memo += [self._prev_optimisation_index]
         elif self._next_optimisation <= len(self.lambda_history):
             start = 0 if start is None else start
             end = 1 if end is None else end
@@ -539,18 +542,24 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
 
             if not _np.isinf(fun) and not _np.isnan(fun) and success:
                 self.current_lambdas = protocol
-                t = fun * self.integrator.getStepSize().in_units_of(_unit.nanosecond)
+                tau = fun * self.integrator.getStepSize().in_units_of(_unit.nanosecond)
                 _logger.info(f"The optimal protocol after adaptation between lambda = {start} and lambda = {end} with "
-                             f"an expected round trip time of {t} is: {self.current_lambdas}")
-                T = self.expectedTransitionMatrix(self.current_lambdas, self.MBAR()[-1])
-                _logger.info(f"The corresponding transition matrix is: \n{_np.round(T, 3)}")
+                             f"an expected round trip time of {tau} is: {self.current_lambdas}")
+                transition_matrix = self.expectedTransitionMatrix(self.current_lambdas, self.MBAR()[-1])
+                self._decorr_memo = self.current_lambdas, transition_matrix
+                _logger.debug(f"The corresponding transition matrix is: \n{_np.round(transition_matrix, 3)}")
+                _logger.debug(f"Relative effective decorrelation time is {self.effectiveDecorrelationTime()}")
             else:
                 _logger.info("Optimisation failed, most likely due to undersampling. Proceeding with current "
                              "protocol...")
+            self._fe_memo = {}
+        else:
+            return
 
-            self._next_optimisation = len(self.lambda_history) + self.freq_opt
-            self._prev_optimisation_index = len(self.lambda_history)
-            self._optimisation_memo += [self._prev_optimisation_index]
+        increment = self.min_update_opt + round(effective_sample_size * (self.freq_opt))
+        self._next_optimisation = len(self.lambda_history) + increment
+        self._prev_optimisation_index = len(self.lambda_history)
+        self._optimisation_memo += [self._prev_optimisation_index]
 
     def runSingleIteration(self, *args, **kwargs):
         if self.adaptive_mode:
