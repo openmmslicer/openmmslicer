@@ -1,5 +1,6 @@
 cma
 mdtraj
+numba
 numpy
 scipy
 pymbar
