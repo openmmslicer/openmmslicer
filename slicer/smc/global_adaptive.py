@@ -12,6 +12,7 @@ import simtk.unit as _unit
 
 from .cyclic import CyclicSMCSampler as _CyclicSMCSampler
 from slicer.alchemy import AbsoluteAlchemicalGaussianSoftcoreFactory as _GaussianSCFactory
+from slicer.interpolate import BatchLinearInterp as _BatchLinearInterp
 from slicer.mbar import MBARResult as _MBARResult
 
 _logger = _logging.getLogger(__name__)
@@ -53,13 +54,14 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         # TODO: clean up memos
         self._next_optimisation = None
         self._next_tau_calculation = None
-        self._last_memo_update = 0
+        self._last_interpol_memo_update = 0
+        self._last_total_interpol_memo_update = 0
         self._fe_memo = {}
         self._decorr_memo = None
         self._interpol_memo = _collections.defaultdict(lambda: {
-            0.: [],
-            0.5: [],
-            1.: [],
+            "interp": [],
+            "x": [],
+            "y": [],
             "w": [],
             "i": [],
             "iter": 0,
@@ -109,11 +111,11 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         return indices_new
 
     def _update_interpol_memos(self):
-        if len(self.lambda_history) <= self._last_memo_update:
+        if len(self.lambda_history) <= self._last_interpol_memo_update:
             return
 
         # update the disordered cache
-        relevant_lambdas = set(self.lambda_history[self._last_memo_update:])
+        relevant_lambdas = set(self.lambda_history[self._last_interpol_memo_update:])
         for lambda_ in relevant_lambdas:
             min_iter = self._interpol_memo[lambda_]["iter"]
             walkers = [(i, w) for i, w in enumerate(self._all_walkers) if w.lambda_ is not None
@@ -123,21 +125,30 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             iterations = [w.iteration for w in walkers]
             counters = _collections.Counter(iterations)
             weights = [1 / counters[i] for i in iterations]
-            for k in [0., 0.5, 1.]:
-                self._interpol_memo[lambda_][k] += self.calculateStateEnergies(k, walkers=walkers).tolist()
+            # TODO: obtain interp_lambdas correctly
+            interp_lambdas = sorted({x for x in self.current_lambdas if x < 0.5} | {0.5, 1.})
+            energies = self.calculateStateEnergies(interp_lambdas, walkers=walkers)
+            self._interpol_memo[lambda_]["x"] += [interp_lambdas] * len(walkers)
+            self._interpol_memo[lambda_]["y"] += energies.T.tolist()
             self._interpol_memo[lambda_]["w"] += weights
             self._interpol_memo[lambda_]["i"] += indices
             self._interpol_memo[lambda_]["iter"] = max(w.iteration for w in walkers) + 1
-        self._last_memo_update = len(self.lambda_history)
+        self._last_interpol_memo_update = len(self.lambda_history)
 
+    def _update_total_interpol_memos(self):
         # update the ordered cache
+        if len(self.lambda_history) <= self._last_total_interpol_memo_update:
+            return
+        self._update_interpol_memos()
         lambdas = sorted(self._interpol_memo.keys())
         self._total_interpol_memo = {}
-        for k in [0., 0.5, 1., "w", "i"]:
+        for k in ["x", "y", "w", "i"]:
             self._total_interpol_memo[k] = _np.asarray(sum([self._interpol_memo[x][k] for x in lambdas], []))
+        self._total_interpol_memo["interp"] = _BatchLinearInterp(*[self._total_interpol_memo[k] for k in ["x", "y"]])
         sorted_indices = _np.argsort(self._total_interpol_memo["i"])
         self._total_interpol_memo["i"][sorted_indices] = _np.arange(self._total_interpol_memo["i"].shape[0])
-        self._total_interpol_memo["n"] = _np.asarray([len(self._interpol_memo[x][0.]) for x in lambdas], dtype=_np.int)
+        self._total_interpol_memo["n"] = _np.asarray([len(self._interpol_memo[x]["i"]) for x in lambdas], dtype=_np.int)
+        self._last_total_interpol_memo_update = len(self.lambda_history)
 
     def calculateStateEnergies(self, lambda_=None, walkers=None, **kwargs):
         """
@@ -181,26 +192,17 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
 
         return energies
 
-    def calculateTotalStateEnergies(self, lambda_):
-        self._update_interpol_memos()
-        if lambda_ in [0, 0.5, 1]:
-            E = self._total_interpol_memo[lambda_]
-        elif 0 < lambda_ < 0.5:
-            E = self._total_interpol_memo[0.] * (1 - 2 * lambda_) + self._total_interpol_memo[0.5] * (2 * lambda_)
-        elif 0.5 < lambda_ < 1:
-            E = self._total_interpol_memo[0.5] * (2 - 2 * lambda_) + self._total_interpol_memo[1.] * (2 * lambda_ - 1)
-        else:
-            raise ValueError("Lambda value {} not in the range [0, 1]".format(lambda_))
+    def calculateTotalStateEnergies(self, lambdas):
+        self._update_total_interpol_memos()
+        E = self._total_interpol_memo['interp'](_np.asarray(lambdas))
         return E
 
     def energyMatrix(self, lambdas=None):
         # TODO: make calling the memos more robust
-        self._update_interpol_memos()
+        self._update_total_interpol_memos()
         if lambdas is None:
             lambdas = self.unique_lambdas
-        M = _np.zeros((len(lambdas), self._total_interpol_memo[0.].shape[0]))
-        for i, lambda_ in enumerate(lambdas):
-            M[i, :] = self.calculateTotalStateEnergies(lambda_)
+        M = self.calculateTotalStateEnergies(lambdas)
         return M
 
     def MBAR(self, recalculate=False, start=0., end=1., n_bootstraps=None, decorrelate=True, n_decorr=None, **kwargs):
@@ -561,6 +563,11 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         self._next_optimisation = len(self.lambda_history) + increment
         self._prev_optimisation_index = len(self.lambda_history)
         self._optimisation_memo += [self._prev_optimisation_index]
+
+    def sample(self, *args, **kwargs):
+        super().sample(*args, **kwargs)
+        if not self.adaptive_mode:
+            self._update_interpol_memos()
 
     def runSingleIteration(self, *args, **kwargs):
         if self.adaptive_mode:
