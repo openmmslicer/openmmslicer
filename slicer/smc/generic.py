@@ -217,7 +217,6 @@ class GenericSMCSampler:
 
             # update walkers
             self.walkers = [_Walker(i,
-                                    parent=walker,
                                     state=walker.state,
                                     transform=walker.transform,
                                     reporter_filename=walker.reporter_filename,
@@ -263,7 +262,7 @@ class GenericSMCSampler:
         self._all_walkers = [x for x in self._all_walkers if x not in val] + val
         self._walkers = val
         for walker in self._all_walkers:
-            if walker not in val:
+            if walker not in val and walker.state is not None:
                 walker.state = None
 
     @property
@@ -505,10 +504,9 @@ class GenericSMCSampler:
             self.walker_tree = _Walker(0)
             if not len(self.walkers):
                 state = self.simulation.context.getState(getPositions=True, getEnergy=True)
-                self.walkers = [_Walker(0, parent=self.walker_tree.root, state=state)]
+                self.walkers = [_Walker(0, state=state)]
             # lambda = 0 layer
             self.walkers = [_Walker(i,
-                                    parent=self.walkers[i % len(self.walkers)],
                                     state=self.walkers[i % len(self.walkers)].state,
                                     reporter_filename=self.walkers[i % len(self.walkers)].reporter_filename,
                                     frame=self.walkers[i % len(self.walkers)].frame,
@@ -606,7 +604,7 @@ class GenericSMCSampler:
                 for t in transforms:
                     walker_new = _Walker(i, state=walker.state, lambda_=self.lambda_, iteration=self.iteration(),
                                          transform=t, reporter_filename=walker.reporter_filename,
-                                         frame=walker.frame, logW=walker.logW, parent=walker)
+                                         frame=walker.frame, logW=walker.logW)
                     new_walkers += [walker_new]
                     i += 1
 
@@ -706,7 +704,6 @@ class GenericSMCSampler:
                 logWs += log_weights - _logsumexp(log_weights) + _np.log(log_weights.shape)
 
             new_walkers = [_Walker(i_new,
-                                   parent=walkers[i_old].parent,
                                    state=walkers[i_old].state,
                                    transform=walkers[i_old].transform,
                                    reporter_filename=walkers[i_old].reporter_filename,
@@ -967,7 +964,6 @@ class GenericSMCSampler:
                                  force_constant=force_constant,
                                  output_interval=output_interval)
                 self.walkers += [_Walker(i,
-                                         parent=self.walker_tree.root,
                                          state=self.simulation.context.getState(getPositions=True, getEnergy=True),
                                          reporter_filename=self.current_trajectory_filename,
                                          frame=(i + 1) * frame_step - 1) if frame_step is not None else None]
