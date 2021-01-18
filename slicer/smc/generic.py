@@ -314,7 +314,7 @@ class GenericSMCSampler:
 
         Parameters
         ----------
-        lambda_ : float
+        lambda_ : float or list
             The desired lambda value.
         walkers : [int] or [openmm.State] or None
             Which walkers need to be used. If None, self.walkers are used. Otherwise, these could be in any
@@ -325,18 +325,18 @@ class GenericSMCSampler:
         if walkers is None:
             walkers = self.walkers
         if lambda_ is None:
-            lambdas = _np.asarray([walker.lambda_ for walker in walkers])
+            lambdas = _np.asarray([[walker.lambda_] for walker in walkers])
         else:
-            lambdas = _np.full(len(walkers), lambda_)
+            lambda_ = _np.asarray(lambda_)
+            lambdas = _np.full((len(walkers), lambda_.size), lambda_)
 
-        energies = _np.zeros(len(walkers))
+        energies = _np.zeros(lambdas.shape)
 
         # determine unique walkers for optimal loading from hard drive
         unique_walkers = {}
-        for i, (walker, lambda_) in enumerate(zip(walkers, lambdas)):
+        for i, walker in enumerate(walkers):
             key = None
-            if isinstance(walker, _Walker) and not any(_math.isclose(lambda_, x) for x in walker._energy_cache.keys()) \
-                    and walker.state is None:
+            if isinstance(walker, _Walker) and walker.state is None:
                 key = (walker.reporter_filename, walker.frame)
                 if any(x is None for x in key):
                     raise ValueError("Walkers need to contain either an OpenMM State or a valid trajectory path and "
@@ -360,20 +360,25 @@ class GenericSMCSampler:
             for i in group:
                 walker = walkers[i]
                 lambda_ = lambdas[i]
-                # get cached energy and skip energy evaluation, if applicable
-                if isinstance(walkers[i], _Walker):
-                    energy = walkers[i].getCachedEnergy(lambda_)
-                    if energy is not None:
-                        energies[i] = energy
-                        continue
 
-                # calculate energy and set cache
-                self.setState(walker, **kwargs)
-                self._update_alchemical_lambdas(lambda_)
-                energy = self.simulation.context.getState(getEnergy=True).getPotentialEnergy() / self.kT
-                if isinstance(walker, _Walker):
-                    walker.setCachedEnergy(lambda_, energy)
-                energies[i] = energy
+                state_already_set = False
+                for j, value in enumerate(lambda_):
+                    # get cached energy and skip energy evaluation, if applicable
+                    if isinstance(walkers[i], _Walker):
+                        energy = walkers[i].getCachedEnergy(value)
+                        if energy is not None:
+                            energies[i, j] = energy
+                            continue
+
+                    # calculate energy and set cache
+                    if not state_already_set:
+                        self.setState(walker, **kwargs)
+                        state_already_set = True
+                    self._update_alchemical_lambdas(value)
+                    energy = self.simulation.context.getState(getEnergy=True).getPotentialEnergy() / self.kT
+                    if isinstance(walker, _Walker):
+                        walker.setCachedEnergy(value, energy)
+                    energies[i, j] = energy
 
             # restore original walkers
             if key is not None:
@@ -382,7 +387,10 @@ class GenericSMCSampler:
 
         self._update_alchemical_lambdas(self.lambda_)
 
-        return _np.asarray(energies, dtype=_np.float32)
+        energies = energies.T
+        if energies.shape[0] == 1:
+            energies = energies[0]
+        return energies
 
     def setState(self, state, context=None):
         """
