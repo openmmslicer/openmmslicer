@@ -527,6 +527,7 @@ class GenericSMCSampler:
 
     def sample(self,
                default_decorrelation_steps=500,
+               presamplers=None,
                keep_walkers_in_memory=False,
                write_checkpoint=None,
                load_checkpoint=None,
@@ -536,6 +537,8 @@ class GenericSMCSampler:
             raise ValueError("Need to set a reporter if trajectory is not kept in memory.")
         if write_checkpoint and self.trajectory_reporter is None:
             raise ValueError("Need to set a reporter when storing a checkpoint.")
+        if presamplers is None:
+            presamplers = []
 
         initial_frame = 0
 
@@ -574,6 +577,8 @@ class GenericSMCSampler:
                     r.update(self, n)
             # sample
             self.setState(walker)
+            for presampler in presamplers:
+                presampler(self.simulation)
             self.simulation.context.setVelocitiesToTemperature(self.temperature)
             self.simulation.step(default_decorrelation_steps)
 
@@ -752,6 +757,7 @@ class GenericSMCSampler:
                            fixed_lambdas=None,
                            default_decorrelation_steps=500,
                            maximum_decorrelation_steps=5000,
+                           presamplers=None,
                            n_walkers=1000,
                            generate_transforms=None,
                            n_transforms_per_walker=100,
@@ -854,6 +860,7 @@ class GenericSMCSampler:
             if not skip_sampling:
                 self.sample(
                     default_decorrelation_steps=default_decorrelation_steps,
+                    presamplers=presamplers,
                     keep_walkers_in_memory=keep_walkers_in_memory,
                     write_checkpoint=write_checkpoint,
                     load_checkpoint=load_checkpoint

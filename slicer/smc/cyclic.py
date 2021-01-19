@@ -227,6 +227,7 @@ class CyclicSMCSampler(_GenericSMCSampler):
                                   exact_weights=False,
                                   n_walkers=1,
                                   walker_metric=None,
+                                  presamplers=None,
                                   generate_transforms=None,
                                   n_transforms_per_walker=100,
                                   keep_walkers_in_memory=False,
@@ -260,6 +261,7 @@ class CyclicSMCSampler(_GenericSMCSampler):
         # generate uncorrelated samples
         self.sample(
             default_decorrelation_steps=next_decorr,
+            presamplers=presamplers,
             keep_walkers_in_memory=keep_walkers_in_memory,
             write_checkpoint=write_checkpoint,
             load_checkpoint=load_checkpoint
