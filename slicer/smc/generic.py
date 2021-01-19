@@ -103,12 +103,8 @@ class GenericSMCSampler:
             md_config = {}
         if alch_config is None:
             alch_config = {}
-        if alchemical_functions is None:
-            alchemical_functions = {}
-        self.alchemical_functions = {**self.default_alchemical_functions, **alchemical_functions}
-        for func in self.alchemical_functions.values():
-            assert func(0) == 0 and func(1) == 1, "All alchemical functions must go from 0 to 1"
 
+        self.alchemical_functions = alchemical_functions
         self.coordinates = coordinates
         self.moves = moves
         self.structure = structure
@@ -177,6 +173,18 @@ class GenericSMCSampler:
     def alchemical_atoms(self):
         """[int]: The absolute indices of all alchemical atoms."""
         return self.moves.alchemical_atoms
+
+    @property
+    def alchemical_functions(self):
+        return self._alchemical_functions
+
+    @alchemical_functions.setter
+    def alchemical_functions(self, val):
+        if val is None:
+            val = {}
+        self._alchemical_functions = {**self.default_alchemical_functions, **val}
+        for func in self.alchemical_functions.values():
+            assert func(0) == 0 and func(1) == 1, "All alchemical functions must go from 0 to 1"
 
     @property
     def kT(self):
