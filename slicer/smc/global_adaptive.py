@@ -12,7 +12,6 @@ from scipy.interpolate import interp1d as _interp1d
 import simtk.unit as _unit
 
 from .cyclic import CyclicSMCSampler as _CyclicSMCSampler
-from slicer.alchemy import AbsoluteAlchemicalGaussianSoftcoreFactory as _GaussianSCFactory
 from slicer.interpolate import BatchLinearInterp as _BatchLinearInterp
 from slicer.mbar import MBARResult as _MBARResult
 
@@ -63,9 +62,6 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
     def __init__(self, *args, n_bootstraps_fe=1, n_bootstraps_opt=1, decorrelate_fe=True, decorrelate_opt=True,
                  n_decorr_fe=10, n_decorr_opt=10, min_update_fe=1, min_update_opt=100, freq_update_fe=0.01, freq_opt=0.1,
                  significant_lambda_figures=2, pymbar_kwargs=None, parallel=False, **kwargs):
-        if "alchemical_functions" in kwargs.keys() and kwargs["alchemical_functions"] is not None:
-            _warnings.warn("Custom alchemical functions are not supported. Switching to the defaults...")
-        kwargs["alchemical_functions"] = GlobalAdaptiveCyclicSMCSampler.default_alchemical_functions
         if "fe_estimator" in kwargs.keys():
             _warnings.warn("Custom free energy estimators are not supported. Switching to MBAR...")
             kwargs.pop("fe_estimator")
@@ -639,12 +635,3 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             optimise_kwargs = {}
         self.optimiseProtocol(**optimise_kwargs)
         super()._runPostAdaptiveIteration(**kwargs)
-
-    @staticmethod
-    def generateAlchSystem(*args, **kwargs):
-        if "alchemical_factory" in kwargs.keys():
-            if kwargs["alchemical_factory"] is not _GaussianSCFactory:
-                _warnings.warn("Alchemical factory not supported. Switching to "
-                               "AbsoluteAlchemicalGaussianSoftcoreFactory...")
-        kwargs["alchemical_factory"] = _GaussianSCFactory
-        return super(GlobalAdaptiveCyclicSMCSampler, GlobalAdaptiveCyclicSMCSampler).generateAlchSystem(*args, **kwargs)
