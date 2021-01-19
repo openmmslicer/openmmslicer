@@ -83,7 +83,7 @@ class CyclicSMCSampler(_GenericSMCSampler):
                 kwargs["append"] = False
             else:
                 reporter_filename = str(round(self.lambda_, 8))
-                kwargs["append"] = True if self.iteration() > 1 else False
+                kwargs["append"] = True if self.iteration() > 0 else False
         super().sample(*args, reporter_filename=reporter_filename, **kwargs)
 
     def reweight(self, *args, **kwargs):
@@ -138,6 +138,7 @@ class CyclicSMCSampler(_GenericSMCSampler):
             output_interval=100000,
             target_lambda=1,
             maximum_duration=None,
+            adapt_kwargs=None,
             **kwargs):
         """
         Performs a complete sequential Monte Carlo run until lambda = 1.
@@ -170,14 +171,14 @@ class CyclicSMCSampler(_GenericSMCSampler):
         kwargs
             Keyword arguments to be passed to super().run().
         """
-        kwargs["target_lambda"] = target_lambda
-        if "final_decorrelation_step" in kwargs.keys():
-            kwargs.pop("final_decorrelation_step")
+        default_adapt_kwargs = {"n_walkers": 50, "target_lambda": target_lambda}
+        if adapt_kwargs is not None:
+            default_adapt_kwargs.update(adapt_kwargs)
+        default_adapt_kwargs["final_decorrelation_step"] = True
 
         initial_sampling_steps = self.total_sampling_steps
         if self.adaptive_mode:
             super().run(
-                *args,
                 n_equilibrations=n_equilibrations,
                 equilibration_steps=equilibration_steps,
                 restrain_backbone=restrain_backbone,
@@ -185,8 +186,7 @@ class CyclicSMCSampler(_GenericSMCSampler):
                 restrain_alchemical_atoms=restrain_alchemical_atoms,
                 force_constant=force_constant,
                 output_interval=output_interval,
-                final_decorrelation_step=True,
-                **kwargs
+                **default_adapt_kwargs
             )
             self.adaptive_mode = False
 
@@ -196,29 +196,31 @@ class CyclicSMCSampler(_GenericSMCSampler):
             dt = dsteps * self.integrator.getStepSize().in_units_of(_unit.nanosecond)
             if maximum_duration is not None and dt >= maximum_duration.in_units_of(_unit.nanosecond):
                 break
-            if n_cycles is not None and current_cycle > n_cycles:
+            if n_cycles is not None and current_cycle >= n_cycles:
                 break
-            self._runCycle(*args, **kwargs)
+            self._runCycle(*args, maximum_duration=maximum_duration, **kwargs)
             current_cycle += 1
 
-        lambdas = self.lambda_history[:self.lambda_history.index(1) + 1]
-        fe = sum(self.fe_estimator(lambdas[i + 1], lambdas[i]) for i in range(len(lambdas) - 1))
-        _logger.info("Grand total simulation time was {}".format(dt))
-        _logger.info("Final dimensionless free energy difference (-logZ) between lambda = 0 and lambda = 1 is: {}".
-                     format(fe))
+            lambdas = self.current_lambdas
+            fe = sum(self.fe_estimator(lambdas[i + 1], lambdas[i]) for i in range(len(lambdas) - 1))
+            _logger.info("Dimensionless free energy difference (-logZ) between lambda = 0 and lambda = 1 is: {}".
+                         format(fe))
 
-    def runSingleIteration(self, *args, n_walkers_adapt=50, n_walkers=1, **kwargs):
+        _logger.info("Grand total simulation time was {}".format(dt))
+
+    def runSingleIteration(self, *args, **kwargs):
         if not self.adaptive_mode:
-            all_kwargs = _inspect.signature(self._runPostAdaptiveIteration).parameters
-            valid_kwargs = {k: v for k, v in kwargs.items() if k in all_kwargs.keys()}
-            self._runPostAdaptiveIteration(*args, n_walkers=n_walkers, **valid_kwargs)
+            self._runPostAdaptiveIteration(*args, **kwargs)
         else:
-            all_kwargs = _inspect.signature(super().runSingleIteration).parameters
-            valid_kwargs = {k: v for k, v in kwargs.items() if k in all_kwargs.keys()}
             steps_before = self.total_sampling_steps
-            n_walkers_adapt = len(self.walkers) if self.initialised else max(len(self.walkers), n_walkers_adapt)
-            super().runSingleIteration(*args, n_walkers=n_walkers_adapt, **valid_kwargs)
-            self.sampling_history += [(self.total_sampling_steps - steps_before) // n_walkers_adapt]
+            if self.initialised:
+                if "n_walkers" in kwargs.keys():
+                    kwargs["n_walkers"] = max(len(self.walkers), kwargs["n_walkers"])
+                else:
+                    # TODO: fix
+                    kwargs["n_walkers"] = len(self.walkers)
+            super().runSingleIteration(*args, **kwargs)
+            self.sampling_history += [(self.total_sampling_steps - steps_before) // kwargs["n_walkers"]]
 
     def _runPostAdaptiveIteration(self,
                                   resampling_method=_resmethods.SystematicResampler,
@@ -236,8 +238,7 @@ class CyclicSMCSampler(_GenericSMCSampler):
         # get next lambda and decorrelation time
         prev_lambda = self.lambda_
         self.reweight()
-        idx = next(i for i, x in enumerate(self.lambda_history) if _math.isclose(x, self.lambda_))
-        next_decorr = self.sampling_history[idx]
+        next_decorr = self.decorrelationSteps()
 
         # get next number of walkers, if applicable
         if walker_metric is not None:
@@ -273,9 +274,8 @@ class CyclicSMCSampler(_GenericSMCSampler):
         if self.current_trajectory_filename is not None:
             _logger.info("Trajectory path: \"{}\"".format(self.current_trajectory_filename))
 
-    def _runCycle(self, *args, **kwargs):
+    def _runCycle(self, *args, maximum_duration=None, **kwargs):
         def runOnce():
-            kwargs["target_lambda"] = self.target_lambda
             self.runSingleIteration(*args, **kwargs)
             if self.lambda_ == self.target_lambda:
                 self.target_lambda = int(not self.target_lambda)
@@ -291,6 +291,9 @@ class CyclicSMCSampler(_GenericSMCSampler):
 
         while True:
             runOnce()
+            dt = self.total_sampling_steps * self.integrator.getStepSize().in_units_of(_unit.nanosecond)
+            if maximum_duration is not None and dt >= maximum_duration.in_units_of(_unit.nanosecond):
+                break
             if self.lambda_ == initial_target_lambda:
                 finished_half_cycle = True
             if finished_half_cycle and self.lambda_ == int(not initial_target_lambda):
