@@ -20,12 +20,21 @@ _logger = _logging.getLogger(__name__)
 
 
 class LinearAlchemicalFunction:
-    def __init__(self, start, end):
+    def __init__(self, start, end, full_interpolation=True):
         self.boundaries = (start, end)
+        self.full_interpolation = full_interpolation
 
     @property
     def boundaries(self):
         return (self._start, self._end)
+
+    @property
+    def start(self):
+        return self._start
+
+    @property
+    def end(self):
+        return self._end
 
     @boundaries.setter
     def boundaries(self, val):
