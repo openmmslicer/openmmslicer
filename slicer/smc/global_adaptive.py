@@ -193,17 +193,12 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
 
         return energies
 
-    def calculateTotalStateEnergies(self, lambdas):
-        self._update_total_interpol_memos()
-        E = self._total_interpol_memo['interp'](_np.asarray(lambdas))
-        return E
-
     def energyMatrix(self, lambdas=None):
-        # TODO: make calling the memos more robust
-        self._update_total_interpol_memos()
+        # TODO: make calling the memos more robust?
         if lambdas is None:
             lambdas = self.unique_lambdas
-        M = self.calculateTotalStateEnergies(lambdas)
+        self._update_total_interpol_memos()
+        M = self._total_interpol_memo['interp'](_np.asarray(lambdas))
         return M
 
     def MBAR(self, recalculate=False, start=0., end=1., n_bootstraps=None, decorrelate=True, n_decorr=None, **kwargs):
