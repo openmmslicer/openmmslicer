@@ -14,7 +14,6 @@ _logger = _logging.getLogger(__name__)
 
 
 class CyclicSMCSampler(_GenericSMCSampler):
-    # TODO: correctly reweight adaptive walkers
     # TODO: make pickle work
     _picklable_attrs = _GenericSMCSampler._picklable_attrs + ["target_lambda", "N_opt", "adaptive_mode",
                                                               "sampling_history", "fe_estimator"]
@@ -88,21 +87,24 @@ class CyclicSMCSampler(_GenericSMCSampler):
         super().sample(*args, reporter_filename=reporter_filename, **kwargs)
 
     def reweight(self, *args, **kwargs):
+        # TODO: correctly reweight in case of > 1 walkers
         if self.adaptive_mode:
             return super().reweight(*args, **kwargs)
 
         # get the protocol schedule from the adaptive step
-        idx = next(i for i, x in enumerate(self.lambda_history) if _math.isclose(x, self.lambda_))
+        idx = next(i for i, x in enumerate(self.current_lambdas) if _math.isclose(x, self.lambda_))
         sign = -1 if self.lambda_ != 0 and (self.target_lambda > self.lambda_ or self.lambda_ == 1) else 1
-        prev_lambda = self.lambda_history[(idx + sign)]
+        prev_lambda = self.current_lambdas[(idx + sign)]
         sign = 1 if self.lambda_ != 1 and (self.target_lambda > self.lambda_ or self.lambda_ == 0) else -1
-        next_lambda = self.lambda_history[(idx + sign)]
+        next_lambda = self.current_lambdas[(idx + sign)]
 
         # get acceptance criterion
         fe_fwd = self.fe_estimator(next_lambda, self.lambda_)
         deltaEs_fwd = self.calculateDeltaEs(next_lambda, self.lambda_)
-        acc_fwd = min(1., _np.average(_np.exp(-deltaEs_fwd + fe_fwd)))
-        _logger.debug("Forward probability: {}".format(acc_fwd))
+        samples_fwd = _np.sum(_np.meshgrid(fe_fwd, -deltaEs_fwd), axis=0)
+        acc_fwd = _np.average(_np.exp(_np.minimum(samples_fwd, 0.)))
+        _logger.debug("Forward probability to lambda = {} is {} with dimensionless free energy = {}".format(
+            next_lambda, acc_fwd, fe_fwd))
         
         # accept or reject move and/or swap direction
         randnum = _random.random()
@@ -110,8 +112,10 @@ class CyclicSMCSampler(_GenericSMCSampler):
             if not _math.isclose(next_lambda, prev_lambda):
                 fe_bwd = self.fe_estimator(prev_lambda, self.lambda_)
                 deltaEs_bwd = self.calculateDeltaEs(prev_lambda, self.lambda_)
-                acc_bwd = max(0., min(1., _np.average(_np.exp(-deltaEs_bwd + fe_bwd))) - acc_fwd)
-                _logger.debug("Backward probability: {}".format(acc_bwd))
+                samples_bwd = _np.sum(_np.meshgrid(fe_bwd, -deltaEs_bwd), axis=0)
+                acc_bwd = max(0., _np.average(_np.exp(_np.minimum(samples_bwd, 0.))) - acc_fwd)
+                _logger.debug("Backward probability to lambda = {} is {} with dimensionless free energy = {}".format(
+                    prev_lambda, acc_bwd, fe_bwd))
 
                 if acc_bwd != 0. and randnum - acc_fwd < acc_bwd:
                     self.target_lambda = int(not self.target_lambda)
