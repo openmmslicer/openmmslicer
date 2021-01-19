@@ -523,10 +523,10 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         return protocol_curr, fun_curr, success
 
     def optimiseProtocol(self, start=None, end=None, **kwargs):
-        effective_sample_size = len(self.lambda_history)
+        effective_sample_size = self._last_total_interpol_memo_update
         if self._next_optimisation is None:
             self.current_lambdas = self.lambda_history[:self.lambda_history.index(1) + 1]
-        elif self._next_optimisation <= len(self.lambda_history):
+        elif self._next_optimisation <= self._last_total_interpol_memo_update:
             start = 0 if start is None else start
             end = 1 if end is None else end
 
@@ -535,7 +535,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             if self.decorrelate_opt:
                 tau = self.effectiveDecorrelationTime()
                 max_distance = max(1, round(float(tau)))
-                effective_sample_size = len(self.lambda_history) // max_distance
+                effective_sample_size = self._last_total_interpol_memo_update // max_distance
 
             protocol, fun, success = self._discrete_optimise_protocol(start=start, end=end, **kwargs)
             if _np.isinf(fun) or _np.isnan(fun) or not success:
@@ -561,15 +561,18 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             return
 
         increment = self.min_update_opt + round(effective_sample_size * (self.freq_opt))
-        self._next_optimisation = len(self.lambda_history) + increment
-        self._prev_optimisation_index = len(self.lambda_history)
+        self._next_optimisation = self._last_total_interpol_memo_update + increment
+        self._prev_optimisation_index = self._last_total_interpol_memo_update
         self._optimisation_memo += [self._prev_optimisation_index]
 
     def sample(self, *args, **kwargs):
         if self.parallel and 1 in self.lambda_history[:-1]:
+            def optfunc():
+                self.fe_estimator(0, 1)
+                self.optimiseProtocol()
             p1 = _threading.Thread(target=super().sample, args=args, kwargs=kwargs)
             p1.start()
-            p2 = _threading.Thread(target=self.fe_estimator, args=(0, 1))
+            p2 = _threading.Thread(target=optfunc)
             p2.start()
             p1.join()
             p2.join()
