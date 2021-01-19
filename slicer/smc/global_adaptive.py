@@ -614,7 +614,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
 
     def runSingleIteration(self, *args, **kwargs):
         if self.adaptive_mode:
-            minimum_value = 1. / self.significant_lambda_figures
+            minimum_value = 1. / 10 ** self.significant_lambda_figures
             for key in ["default_dlambda", "minimum_dlambda", "maximum_dlambda", "target_lambda"]:
                 if key in kwargs.keys():
                     kwargs[key] = _np.sign(kwargs[key]) * max(minimum_value, round(abs(kwargs[key]),
