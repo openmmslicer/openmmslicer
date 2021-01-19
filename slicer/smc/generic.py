@@ -191,7 +191,8 @@ class GenericSMCSampler:
     def iteration(self, lambda_=None):
         if lambda_ is None:
             lambda_ = self.lambda_
-        return len([x for x in self.lambda_history if _math.isclose(x, lambda_)]) - 1
+        # TODO: fix rounding
+        return len([x for x in self.lambda_history if round(x, 8) == round(lambda_, 8)]) - 1
 
     @property
     def lambda_(self):
@@ -627,9 +628,13 @@ class GenericSMCSampler:
                  minimum_dlambda=None,
                  maximum_dlambda=None,
                  target_lambda=1,
+                 fixed_lambdas=None,
                  change_lambda=True):
         if self.lambda_ == target_lambda:
             return
+
+        if fixed_lambdas is None:
+            fixed_lambdas = []
 
         if _inspect.isclass(resampling_metric):
             resampling_metric = resampling_metric(self)
@@ -647,7 +652,7 @@ class GenericSMCSampler:
                 return val
 
         # change direction, if needed
-        sgn = _np.sign(target_lambda - self.lambda_)
+        sgn = int(_np.sign(target_lambda - self.lambda_))
         if default_dlambda is not None:
             default_dlambda = sgn * abs(default_dlambda)
         if minimum_dlambda is not None:
@@ -672,6 +677,10 @@ class GenericSMCSampler:
                                                         target_lambda, minimum_x=minimum_lambda,
                                                         initial_guess_x=initial_guess_x, current_y=current_y,
                                                         tol=target_metric_tol, maxfun=maximum_metric_evaluations)
+            fixed_lambdas_filtered = [x for x in sorted(fixed_lambdas)
+                                      if sgn * self.lambda_ < sgn * x < sgn * next_lambda_]
+            if len(fixed_lambdas_filtered):
+                next_lambda_ = fixed_lambdas_filtered[-1 * sgn]
             _logger.debug("Tentative next lambda: {:.8g}".format(next_lambda_))
         else:
             # else use default_dlambda
@@ -740,6 +749,7 @@ class GenericSMCSampler:
                            minimum_dlambda=None,
                            maximum_dlambda=None,
                            target_lambda=1,
+                           fixed_lambdas=None,
                            default_decorrelation_steps=500,
                            maximum_decorrelation_steps=5000,
                            n_walkers=1000,
@@ -813,11 +823,12 @@ class GenericSMCSampler:
             default_dlambda=default_dlambda,
             minimum_dlambda=minimum_dlambda,
             maximum_dlambda=maximum_dlambda,
-            target_lambda=target_lambda
+            target_lambda=target_lambda,
+            fixed_lambdas=fixed_lambdas
         )
         self.initialise(n_walkers)
 
-        if self.lambda_ and sampling_metric and not load_checkpoint:
+        if sampling_metric is not None and not load_checkpoint:
             sampling_metric.evaluateBefore()
         elapsed_steps = 0
         while True:
@@ -856,19 +867,9 @@ class GenericSMCSampler:
                 self.writeCheckpoint(data, filename=write_checkpoint, update=False)
                 load_checkpoint = None
 
-            # generate transforms
-            self.generateTransforms(
-                n_transforms_per_walker=n_transforms_per_walker,
-                generate_transforms=generate_transforms,
-            )
-
-            # return if final decorrelation
-            if self.lambda_ == target_lambda:
-                return
-
             # evaluate sampling metric
             next_lambda = None
-            if self.lambda_ and sampling_metric:
+            if sampling_metric is not None:
                 if sampling_metric.requireNextLambda:
                     next_lambda = self.reweight(**reweight_kwargs, change_lambda=False)
                     sampling_metric.evaluateAfter(next_lambda)
@@ -881,12 +882,22 @@ class GenericSMCSampler:
                     continue
                 sampling_metric.reset()
 
+            # generate transforms
+            self.generateTransforms(
+                n_transforms_per_walker=n_transforms_per_walker,
+                generate_transforms=generate_transforms,
+            )
+
             # reweight if needed and change lambda
-            if next_lambda is None:
-                self.reweight(**reweight_kwargs)
-            else:
-                self.lambda_ = next_lambda
+            if self.lambda_ != target_lambda:
+                if next_lambda is None:
+                    self.reweight(**reweight_kwargs)
+                else:
+                    self.lambda_ = next_lambda
             break
+
+        if self.lambda_ == target_lambda:
+            return
 
         # resample
         self.resample(
@@ -1105,8 +1116,8 @@ class GenericSMCSampler:
         alch_system = factory.create_alchemical_system(system, alch_region)
         return alch_system
 
-    @classmethod
-    def generateSimFromStruct(cls, structure, system, integrator, platform=None, properties=None):
+    @staticmethod
+    def generateSimFromStruct(structure, system, integrator, platform=None, properties=None):
         """
         Generate the OpenMM Simulation objects from a given parmed.Structure()
 
