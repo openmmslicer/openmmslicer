@@ -19,19 +19,38 @@ class CyclicSMCSampler(_GenericSMCSampler):
     _picklable_attrs = _GenericSMCSampler._picklable_attrs + ["target_lambda", "N_opt", "adaptive_mode",
                                                               "sampling_history", "fe_estimator"]
 
-    def __init__(self, *args, fe_estimator=_fe_estimators.EqualMetropolis, **kwargs):
-        self.target_lambda = 1
+    def __init__(self, *args, fe_estimator=_fe_estimators.BAR, **kwargs):
+        self._target_lambda = 1
         self.N_opt = None
         self.adaptive_mode = True
         self.sampling_history = []
-        if not issubclass(fe_estimator, _fe_estimators.AbstractFEEstimator):
-            raise TypeError("The free energy estimator must be inherited from the abstract base class")
-        self.fe_estimator = fe_estimator(self)
+        self.fe_estimator = fe_estimator
         super().__init__(*args, **kwargs)
 
     def walker_filter(self, lambda_, **kwargs):
         initial_filter = [w for w in self._all_walkers if w.lambda_ is not None and _math.isclose(w.lambda_, lambda_)]
         return [w for w in initial_filter if all(getattr(w, k) == v for k, v in kwargs.items())]
+
+    @property
+    def current_lambdas(self):
+        return self.lambda_history[:self.lambda_history.index(1) + 1]
+
+    @property
+    def cycles(self):
+        from itertools import groupby
+        all_terminal = [x for x in self.lambda_history[1:] if x in [0., 1.]]
+        all_terminal = [x[0] for x in groupby(all_terminal)]
+        return (len(all_terminal) - 1) // 2
+
+    @property
+    def fe_estimator(self):
+        return self._fe_estimator
+
+    @fe_estimator.setter
+    def fe_estimator(self, val):
+        if not issubclass(val, _fe_estimators.AbstractFEEstimator):
+            raise TypeError("The free energy estimator must be inherited from the abstract base class")
+        self._fe_estimator = val(self)
 
     @property
     def target_lambda(self):
@@ -41,6 +60,22 @@ class CyclicSMCSampler(_GenericSMCSampler):
     def target_lambda(self, val):
         assert val in [0, 1], "The target lambda must be one of the terminal lambda states"
         self._target_lambda = val
+
+    def decorrelationSteps(self, lambda_=None):
+        if lambda_ is None:
+            lambda_ = self.lambda_
+        if not 0 <= lambda_ <= 1:
+            raise ValueError("Lambda must be between 0 and 1")
+        if 0 not in self.lambda_history and 1 not in self.lambda_history:
+            return None
+        lambdas = self.lambda_history[:len(self.sampling_history)]
+        if any(_math.isclose(x, lambda_) for x in lambdas):
+            return next(y for x, y in zip(lambdas, self.sampling_history) if _math.isclose(x, lambda_))
+        i_prev, i_next = next((i - 1, i) for i, x in enumerate(lambdas) if x >= lambda_)
+        x1, x2 = self.lambda_history[i_prev], self.lambda_history[i_next]
+        y1, y2 = self.sampling_history[i_prev], self.sampling_history[i_next]
+        decorrelation_steps = int((y2 - y1) / (x2 - x1) * (lambda_ - x1) + y1)
+        return decorrelation_steps
 
     def sample(self, *args, reporter_filename=None, **kwargs):
         if reporter_filename is None:
