@@ -19,11 +19,34 @@ from slicer.mbar import MBARResult as _MBARResult
 _logger = _logging.getLogger(__name__)
 
 
+class LinearAlchemicalFunction:
+    def __init__(self, start, end):
+        self.boundaries = (start, end)
+
+    @property
+    def boundaries(self):
+        return (self._start, self._end)
+
+    @boundaries.setter
+    def boundaries(self, val):
+        if not isinstance(val, tuple) or len(val) != 2 or val[0] >= val[1] or any(not 0 <= x <= 1 for x in val):
+            raise ValueError("Need to supply a valid tuple with two ordered values between 0 and 1")
+        self._start, self._end = val
+
+    def __call__(self, x):
+        if x <= self._start:
+            return 0.
+        elif x >= self._end:
+            return 1.
+        else:
+            return (x - self._start) / (self._end - self._start)
+
+
 class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
     default_alchemical_functions = {
-        'lambda_sterics': lambda x: x,
-        'lambda_electrostatics': lambda x: max(0., 2. * x - 1.),
-        'lambda_torsions': lambda x: max(0., 2. * x - 1.),
+        'lambda_sterics': LinearAlchemicalFunction(0, 0.5),
+        'lambda_electrostatics': LinearAlchemicalFunction(0.5, 1),
+        'lambda_torsions': LinearAlchemicalFunction(0, 0.5),
     }
 
     default_pymbar_kwargs = dict(solver_protocol=(dict(method=None, tol=1e-8, options=dict(maximum_iterations=100)),))
@@ -71,6 +94,19 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         self._total_interpol_memo = {}
         self._protocol_memo = {}
         self._optimisation_memo = [0]
+
+    @_CyclicSMCSampler.alchemical_functions.setter
+    def alchemical_functions(self, val):
+        if val is None:
+            val = {}
+        for key, value in val.items():
+            if not isinstance(value, LinearAlchemicalFunction):
+                raise TypeError(f"Value {value} must be an instance of LinearAlchemicalFunction")
+
+        self._alchemical_functions = {**self.default_alchemical_functions, **val}
+        # this shouldn't be needed but better safe than sorry
+        for func in self.alchemical_functions.values():
+            assert func(0) == 0 and func(1) == 1, "All alchemical functions must go from 0 to 1"
 
     @property
     def current_lambdas(self):
