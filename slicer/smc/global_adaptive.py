@@ -20,12 +20,12 @@ _logger = _logging.getLogger(__name__)
 
 class LinearAlchemicalFunction:
     def __init__(self, start, end, full_interpolation=True):
-        self.boundaries = (start, end)
+        self.boundaries = start, end
         self.full_interpolation = full_interpolation
 
     @property
     def boundaries(self):
-        return (self._start, self._end)
+        return self._start, self._end
 
     @property
     def start(self):
@@ -200,48 +200,6 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         self._total_interpol_memo["n"] = _np.asarray([len(self._interpol_memo[x]["i"]) for x in lambdas], dtype=_np.int)
         self._last_total_interpol_memo_update = self._last_interpol_memo_update
 
-    def calculateStateEnergies(self, lambda_=None, walkers=None, **kwargs):
-        """
-        Calculates the reduced potential energies of all states for a given lambda value.
-
-        Parameters
-        ----------
-        lambda_ : float
-            The desired lambda value.
-        walkers : [int] or [openmm.State] or None
-            Which walkers need to be used. If None, self.walkers are used. Otherwise, these could be in any
-            format supported by setState().
-        kwargs
-            Keyword arguments to be passed to setState().
-        """
-        if walkers is None:
-            walkers = self.walkers
-        if lambda_ is None:
-            lambdas = _np.asarray([walker.lambda_ for walker in walkers])
-        else:
-            lambdas = _np.full(len(walkers), lambda_)
-        unique_lambdas = _np.unique(lambdas)
-        energies = _np.zeros(len(walkers))
-
-        for lambda_ in unique_lambdas:
-            indices = _np.where(lambdas == lambda_)[0]
-            kwargs["walkers"] = [walkers[i] for i in indices]
-            if lambda_ in [0, 0.5, 1]:
-                current_energies = super().calculateStateEnergies(lambda_, **kwargs)
-            elif 0 < lambda_ < 0.5:
-                current_energies_0 = super().calculateStateEnergies(0, **kwargs)
-                current_energies_half = super().calculateStateEnergies(0.5, **kwargs)
-                current_energies = current_energies_0 * (1 - 2 * lambda_) + current_energies_half * (2 * lambda_)
-            elif 0.5 < lambda_ < 1:
-                current_energies_half = super().calculateStateEnergies(0.5, **kwargs)
-                current_energies_1 = super().calculateStateEnergies(1, **kwargs)
-                current_energies = current_energies_half * (2 - 2 * lambda_) + current_energies_1 * (2 * lambda_ - 1)
-            else:
-                raise ValueError("Lambda value {} not in the range [0, 1]".format(lambda_))
-            energies[indices] = current_energies
-
-        return energies
-
     def energyMatrix(self, lambdas=None):
         # TODO: make calling the memos more robust?
         if lambdas is None:
@@ -303,6 +261,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
                         try:
                             mbars += [_MBARResult(u_kn, N_k, train_indices=x, **kwargs)]
                         except:
+                            # TODO: fix index error
                             _logger.warning(f"Error while creating MBAR result: {_sys.exc_info()[0]}")
                             mbars += [None]
                     else:
