@@ -3,6 +3,7 @@ import functools as _functools
 import logging as _logging
 import math as _math
 import sys as _sys
+import threading as _threading
 import warnings as _warnings
 
 import cma as _cma
@@ -29,7 +30,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
 
     def __init__(self, *args, n_bootstraps_fe=1, n_bootstraps_opt=1, decorrelate_fe=True, decorrelate_opt=True,
                  n_decorr_fe=10, n_decorr_opt=10, min_update_fe=1, min_update_opt=100, freq_update_fe=0.01, freq_opt=0.1,
-                 significant_lambda_figures=2, pymbar_kwargs=None, **kwargs):
+                 significant_lambda_figures=2, pymbar_kwargs=None, parallel=False, **kwargs):
         if "alchemical_functions" in kwargs.keys() and kwargs["alchemical_functions"] is not None:
             _warnings.warn("Custom alchemical functions are not supported. Switching to the defaults...")
         kwargs["alchemical_functions"] = GlobalAdaptiveCyclicSMCSampler.default_alchemical_functions
@@ -40,6 +41,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         if pymbar_kwargs is None:
             pymbar_kwargs = {}
         self.pymbar_kwargs = {**self.default_pymbar_kwargs, **pymbar_kwargs}
+        self.parallel = parallel
         self.n_bootstraps_fe = n_bootstraps_fe
         self.n_bootstraps_opt = n_bootstraps_opt
         self.decorrelate_fe = decorrelate_fe
@@ -137,9 +139,8 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
 
     def _update_total_interpol_memos(self):
         # update the ordered cache
-        if len(self.lambda_history) <= self._last_total_interpol_memo_update:
+        if self._last_interpol_memo_update == self._last_total_interpol_memo_update:
             return
-        self._update_interpol_memos()
         lambdas = sorted(self._interpol_memo.keys())
         self._total_interpol_memo = {}
         for k in ["x", "y", "w", "i"]:
@@ -148,7 +149,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         sorted_indices = _np.argsort(self._total_interpol_memo["i"])
         self._total_interpol_memo["i"][sorted_indices] = _np.arange(self._total_interpol_memo["i"].shape[0])
         self._total_interpol_memo["n"] = _np.asarray([len(self._interpol_memo[x]["i"]) for x in lambdas], dtype=_np.int)
-        self._last_total_interpol_memo_update = len(self.lambda_history)
+        self._last_total_interpol_memo_update = self._last_interpol_memo_update
 
     def calculateStateEnergies(self, lambda_=None, walkers=None, **kwargs):
         """
@@ -209,7 +210,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         kwargs = {**self.pymbar_kwargs, **kwargs}
         key = (start, end)
 
-        if recalculate or key not in self._fe_memo or self._fe_memo[key][0] <= len(self.lambda_history):
+        if recalculate or key not in self._fe_memo or self._fe_memo[key][0] >= self._last_total_interpol_memo_update:
             # initialise all data needed for MBAR
             lambdas = _np.asarray(self.unique_lambdas)
             u_kn = self.energyMatrix()
@@ -221,14 +222,14 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
                 max_distance = max(1, round(float(tau)))
                 n_decorr = max_distance if n_decorr is None else max(1, min(n_decorr, max_distance))
                 offsets = _np.random.choice(_np.arange(max_distance), size=n_decorr, replace=False)
-                all_indices = [sorted(range(len(self.lambda_history) - 1 - x, -1, -max_distance)) for x in offsets]
+                all_indices = [sorted(range(self._last_total_interpol_memo_update - 1 - x, -1, -max_distance)) for x in offsets]
                 all_indices = self._time_to_mbar_indices(all_indices)
             else:
                 all_indices = [_np.arange(u_kn.shape[1])]
 
             # get initial free energy estimates from previous calls to MBAR
             try:
-                indices = self._time_to_mbar_indices([list(range(len(self.lambda_history)))])[0][:self._fe_memo[key][-1][0]._u_kn.shape[1]]
+                indices = self._time_to_mbar_indices([list(range(self._last_total_interpol_memo_update))])[0][:self._fe_memo[key][-1][0]._u_kn.shape[1]]
                 u_kn_test = u_kn[:, _np.sort(indices)]
                 old_fes = self._fe_memo[key][-1][0].computePerturbedFreeEnergies(u_kn_test, memo_key=tuple(lambdas))
                 kwargs["initial_f_k"] = old_fes - old_fes[0]
@@ -270,11 +271,11 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
                     mbar.computePerturbedFreeEnergies(u_kn_pert, memo_key=tuple(self.current_lambdas))
 
             # update cache
-            effective_sample_size = len(self.lambda_history)
+            effective_sample_size = self._last_total_interpol_memo_update
             if decorrelate:
                 effective_sample_size //= max_distance
             increment = self.min_update_fe + round(effective_sample_size * (self.freq_update_fe))
-            next_fe_calculation = len(self.lambda_history) + increment
+            next_fe_calculation = self._last_total_interpol_memo_update + increment
             self._fe_memo[key] = next_fe_calculation, self.current_lambdas, mbars
 
         return self._fe_memo[key][1:]
@@ -565,8 +566,16 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         self._optimisation_memo += [self._prev_optimisation_index]
 
     def sample(self, *args, **kwargs):
-        super().sample(*args, **kwargs)
-        if not self.adaptive_mode:
+        if self.parallel and 1 in self.lambda_history[:-1]:
+            p1 = _threading.Thread(target=super().sample, args=args, kwargs=kwargs)
+            p1.start()
+            p2 = _threading.Thread(target=self.fe_estimator, args=(0, 1))
+            p2.start()
+            p1.join()
+            p2.join()
+        else:
+            super().sample(*args, **kwargs)
+        if 1 in self.lambda_history:
             self._update_interpol_memos()
 
     def runSingleIteration(self, *args, **kwargs):
