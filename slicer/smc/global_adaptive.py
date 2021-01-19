@@ -133,6 +133,15 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         right = self.current_lambdas[min(max_lambda_idx + 1, len(self.current_lambdas) - 1)]
         return left, right
 
+    @property
+    def interpolatable_lambdas(self):
+        lambdas = set()
+        for key, value in self.alchemical_functions.items():
+            if value.full_interpolation:
+                lambdas |= {x for x in self.current_lambdas if value.start <= x <= value.end}
+            lambdas |= set(value.boundaries)
+        return sorted(lambdas)
+
     @_CyclicSMCSampler.lambda_.setter
     def lambda_(self, val):
         if val is not None:
@@ -168,8 +177,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             iterations = [w.iteration for w in walkers]
             counters = _collections.Counter(iterations)
             weights = [1 / counters[i] for i in iterations]
-            # TODO: obtain interp_lambdas correctly
-            interp_lambdas = sorted({x for x in self.current_lambdas if x < 0.5} | {0.5, 1.})
+            interp_lambdas = self.interpolatable_lambdas
             energies = self.calculateStateEnergies(interp_lambdas, walkers=walkers)
             self._interpol_memo[lambda_]["x"] += [interp_lambdas] * len(walkers)
             self._interpol_memo[lambda_]["y"] += energies.T.tolist()
