@@ -161,8 +161,11 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             return
         lambdas = sorted(self._interpol_memo.keys())
         self._total_interpol_memo = {}
-        for k in ["x", "y", "w", "i"]:
-            self._total_interpol_memo[k] = _np.asarray(sum([self._interpol_memo[x][k] for x in lambdas], []))
+        # sometimes NumPy complains about ragged arrays so we filter this warning
+        with _np.warnings.catch_warnings():
+            _np.warnings.filterwarnings('ignore', category=_np.VisibleDeprecationWarning)
+            for k in ["x", "y", "w", "i"]:
+                self._total_interpol_memo[k] = _np.asarray(sum([self._interpol_memo[x][k] for x in lambdas], []))
         self._total_interpol_memo["interp"] = _BatchLinearInterp(*[self._total_interpol_memo[k] for k in ["x", "y"]])
         sorted_indices = _np.argsort(self._total_interpol_memo["i"])
         self._total_interpol_memo["i"][sorted_indices] = _np.arange(self._total_interpol_memo["i"].shape[0])
