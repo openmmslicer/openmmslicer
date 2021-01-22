@@ -12,49 +12,18 @@ from scipy.interpolate import interp1d as _interp1d
 import simtk.unit as _unit
 
 from .cyclic import CyclicSMCSampler as _CyclicSMCSampler
+from .misc import LinearAlchemicalFunction as _LinearAlchemicalFunction
 from slicer.interpolate import BatchLinearInterp as _BatchLinearInterp
 from slicer.mbar import MBARResult as _MBARResult
 
 _logger = _logging.getLogger(__name__)
 
 
-class LinearAlchemicalFunction:
-    def __init__(self, start, end, full_interpolation=True):
-        self.boundaries = start, end
-        self.full_interpolation = full_interpolation
-
-    @property
-    def boundaries(self):
-        return self._start, self._end
-
-    @property
-    def start(self):
-        return self._start
-
-    @property
-    def end(self):
-        return self._end
-
-    @boundaries.setter
-    def boundaries(self, val):
-        if not isinstance(val, tuple) or len(val) != 2 or val[0] >= val[1] or any(not 0 <= x <= 1 for x in val):
-            raise ValueError("Need to supply a valid tuple with two ordered values between 0 and 1")
-        self._start, self._end = val
-
-    def __call__(self, x):
-        if x <= self._start:
-            return 0.
-        elif x >= self._end:
-            return 1.
-        else:
-            return (x - self._start) / (self._end - self._start)
-
-
 class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
     default_alchemical_functions = {
-        'lambda_sterics': LinearAlchemicalFunction(0, 0.5),
-        'lambda_electrostatics': LinearAlchemicalFunction(0.5, 1),
-        'lambda_torsions': LinearAlchemicalFunction(0, 0.5),
+        'lambda_sterics': _LinearAlchemicalFunction(0, 0.5),
+        'lambda_electrostatics': _LinearAlchemicalFunction(0.5, 1),
+        'lambda_torsions': _LinearAlchemicalFunction(0, 0.5),
     }
 
     default_pymbar_kwargs = dict(solver_protocol=(dict(method=None, tol=1e-8, options=dict(maximum_iterations=100)),))
@@ -105,7 +74,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         if val is None:
             val = {}
         for key, value in val.items():
-            if not isinstance(value, LinearAlchemicalFunction):
+            if not isinstance(value, _LinearAlchemicalFunction):
                 raise TypeError(f"Value {value} must be an instance of LinearAlchemicalFunction")
 
         self._alchemical_functions = {**self.default_alchemical_functions, **val}
