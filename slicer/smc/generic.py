@@ -2,7 +2,6 @@ from collections import Counter as _Counter
 import copy as _copy
 import inspect as _inspect
 import logging as _logging
-import math as _math
 import os as _os
 import pickle as _pickle
 import random as _random
@@ -16,7 +15,7 @@ import simtk.openmm as _openmm
 import simtk.openmm.app as _app
 import simtk.unit as _unit
 
-from .misc import Walker as _Walker
+from .misc import Walker as _Walker, WalkerMemo as _WalkerMemo
 from slicer.minimise import BisectingMinimiser as _BisectingMinimiser
 import slicer.moves as _moves
 import slicer.reporters as _reporters
@@ -89,8 +88,7 @@ class GenericSMCSampler:
         The current estimate of the dimensionless free energy difference.
     """
     # TODO: make pickle work
-    _picklable_attrs = ["total_sampling_steps", "_lambda_", "lambda_history", "walkers", "initialised", "walker_tree",
-                        "_all_walkers", "reporters"]
+    _picklable_attrs = ["total_sampling_steps", "_lambda_", "lambda_history", "walkers", "initialised", "reporters"]
     default_alchemical_functions = {
         'lambda_sterics': lambda x: min(1.25 * x, 1.),
         'lambda_electrostatics': lambda x: max(0., 5. * x - 4.),
@@ -128,8 +126,7 @@ class GenericSMCSampler:
         self._lambda_ = 0.
         self.lambda_history = [0.]
         self.reporters = []
-        self.walker_tree = _Walker(0, lambda_=None, iteration=None, transform=None)
-        self._all_walkers = [self.walker_tree]
+        self.walker_memo = _WalkerMemo()
         self.walkers = []
 
         if checkpoint is not None:
@@ -268,11 +265,8 @@ class GenericSMCSampler:
 
     @walkers.setter
     def walkers(self, val):
-        self._all_walkers = [x for x in self._all_walkers if x not in val] + val
+        self.walker_memo.updateWalkers(val)
         self._walkers = val
-        for walker in self._all_walkers:
-            if walker not in val and walker.state is not None:
-                walker.state = None
 
     @property
     def temperature(self):
@@ -518,7 +512,6 @@ class GenericSMCSampler:
     def initialise(self, n_walkers):
         if not self.initialised:
             # root layer
-            self.walker_tree = _Walker(0)
             if not len(self.walkers):
                 state = self.simulation.context.getState(getPositions=True, getEnergy=True)
                 self.walkers = [_Walker(0, state=state)]
@@ -559,7 +552,8 @@ class GenericSMCSampler:
             if load_checkpoint:
                 self.trajectory_reporter.prune()
             if append:
-                duplicates = [w for w in self._all_walkers if w.reporter_filename == self.current_trajectory_filename]
+                duplicates = [w for w in self.walker_memo.walkers
+                              if w.reporter_filename == self.current_trajectory_filename]
                 initial_frame = max([w.frame for w in duplicates]) + 1 if len(duplicates) else 0
         if self.state_data_reporters is not None:
             self.simulation.reporters += self.state_data_reporters
@@ -745,7 +739,7 @@ class GenericSMCSampler:
 
             # update the object, if applicable
             if change_walkers:
-                self._all_walkers = [x for x in self._all_walkers if x not in walkers]
+                self.walker_memo.removeWalkers(walkers)
                 self.walkers = new_walkers
 
         return new_walkers
