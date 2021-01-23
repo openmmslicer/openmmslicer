@@ -1,6 +1,8 @@
+cached-property
 cma
 mdtraj
 numba
 numpy
 scipy
+pandas
 pymbar

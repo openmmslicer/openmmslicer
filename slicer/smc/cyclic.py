@@ -26,10 +26,6 @@ class CyclicSMCSampler(_GenericSMCSampler):
         self.fe_estimator = fe_estimator
         super().__init__(*args, **kwargs)
 
-    def walker_filter(self, lambda_, **kwargs):
-        initial_filter = [w for w in self._all_walkers if w.lambda_ is not None and _math.isclose(w.lambda_, lambda_)]
-        return [w for w in initial_filter if all(getattr(w, k) == v for k, v in kwargs.items())]
-
     @property
     def current_lambdas(self):
         return self.lambda_history[:self.lambda_history.index(1) + 1]

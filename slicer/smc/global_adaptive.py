@@ -1,7 +1,5 @@
-import collections as _collections
 import functools as _functools
 import logging as _logging
-import math as _math
 import sys as _sys
 import threading as _threading
 import warnings as _warnings
@@ -13,7 +11,6 @@ import simtk.unit as _unit
 
 from .cyclic import CyclicSMCSampler as _CyclicSMCSampler
 from .misc import LinearAlchemicalFunction as _LinearAlchemicalFunction
-from slicer.interpolate import BatchLinearInterp as _BatchLinearInterp
 from slicer.mbar import MBARResult as _MBARResult
 
 _logger = _logging.getLogger(__name__)
@@ -53,19 +50,8 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         # TODO: clean up memos
         self._next_optimisation = None
         self._next_tau_calculation = None
-        self._last_interpol_memo_update = 0
-        self._last_total_interpol_memo_update = 0
         self._fe_memo = {}
         self._decorr_memo = None
-        self._interpol_memo = _collections.defaultdict(lambda: {
-            "interp": [],
-            "x": [],
-            "y": [],
-            "w": [],
-            "i": [],
-            "iter": 0,
-        })
-        self._total_interpol_memo = {}
         self._protocol_memo = {}
         self._optimisation_memo = [0]
 
@@ -117,78 +103,15 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             val = round(val, self.significant_lambda_figures)
             _CyclicSMCSampler.lambda_.fset(self, val)
 
-    @property
-    def unique_lambdas(self):
-        return sorted(set(self.lambda_history))
-
-    def _time_to_mbar_indices(self, indices):
-        weights = self._total_interpol_memo["w"]
-        argsort = _np.argsort(self._total_interpol_memo["i"])
-        cum_weights = _np.concatenate(([0.], _np.cumsum(weights[argsort])))
-        diff = _np.abs(cum_weights - _np.round(cum_weights, 0))
-        indices_int = _np.where(diff < 1e-8)[0]
-        indices_new = [sum([list(range(indices_int[y], indices_int[y + 1])) for y in x], []) for x in indices]
-        indices_new = [argsort[x] for x in indices_new]
-        return indices_new
-
-    def _update_interpol_memos(self):
-        if len(self.lambda_history) <= self._last_interpol_memo_update:
-            return
-
-        # update the disordered cache
-        relevant_lambdas = set(self.lambda_history[self._last_interpol_memo_update:])
-        for lambda_ in relevant_lambdas:
-            min_iter = self._interpol_memo[lambda_]["iter"]
-            walkers = [(i, w) for i, w in enumerate(self._all_walkers) if w.lambda_ is not None
-                       and _math.isclose(w.lambda_, lambda_) and w.iteration >= min_iter and w.transform is None]
-            indices, walkers = [list(x) for x in zip(*walkers)]
-            walkers.sort(key=lambda x: x.iteration)
-            iterations = [w.iteration for w in walkers]
-            counters = _collections.Counter(iterations)
-            weights = [1 / counters[i] for i in iterations]
-            interp_lambdas = self.interpolatable_lambdas
-            energies = self.calculateStateEnergies(interp_lambdas, walkers=walkers)
-            self._interpol_memo[lambda_]["x"] += [interp_lambdas] * len(walkers)
-            self._interpol_memo[lambda_]["y"] += energies.T.tolist()
-            self._interpol_memo[lambda_]["w"] += weights
-            self._interpol_memo[lambda_]["i"] += indices
-            self._interpol_memo[lambda_]["iter"] = max(w.iteration for w in walkers) + 1
-        self._last_interpol_memo_update = len(self.lambda_history)
-
-    def _update_total_interpol_memos(self):
-        # update the ordered cache
-        if self._last_interpol_memo_update == self._last_total_interpol_memo_update:
-            return
-        lambdas = sorted(self._interpol_memo.keys())
-        self._total_interpol_memo = {}
-        # sometimes NumPy complains about ragged arrays so we filter this warning
-        with _np.warnings.catch_warnings():
-            _np.warnings.filterwarnings('ignore', category=_np.VisibleDeprecationWarning)
-            for k in ["x", "y", "w", "i"]:
-                self._total_interpol_memo[k] = _np.asarray(sum([self._interpol_memo[x][k] for x in lambdas], []))
-        self._total_interpol_memo["interp"] = _BatchLinearInterp(*[self._total_interpol_memo[k] for k in ["x", "y"]])
-        sorted_indices = _np.argsort(self._total_interpol_memo["i"])
-        self._total_interpol_memo["i"][sorted_indices] = _np.arange(self._total_interpol_memo["i"].shape[0])
-        self._total_interpol_memo["n"] = _np.asarray([len(self._interpol_memo[x]["i"]) for x in lambdas], dtype=_np.int)
-        self._last_total_interpol_memo_update = self._last_interpol_memo_update
-
-    def energyMatrix(self, lambdas=None):
-        # TODO: make calling the memos more robust?
-        if lambdas is None:
-            lambdas = self.unique_lambdas
-        self._update_total_interpol_memos()
-        M = self._total_interpol_memo['interp'](_np.asarray(lambdas))
-        return M
-
     def MBAR(self, recalculate=False, start=0., end=1., n_bootstraps=None, decorrelate=True, n_decorr=None, **kwargs):
         kwargs = {**self.pymbar_kwargs, **kwargs}
         key = (start, end)
 
-        if recalculate or key not in self._fe_memo or self._fe_memo[key][0] >= self._last_total_interpol_memo_update:
+        if recalculate or key not in self._fe_memo or self._fe_memo[key][0] >= self.walker_memo.timesteps:
             # initialise all data needed for MBAR
-            lambdas = _np.asarray(self.unique_lambdas)
-            u_kn = self.energyMatrix()
-            N_k = self._total_interpol_memo["n"]
+            lambdas = self.walker_memo.unique_lambdas
+            u_kn = self.walker_memo.energyMatrix()[:, self.walker_memo.arg_mbar_indices]
+            N_k = self.walker_memo.lambda_counts
 
             # create decorrelated datasets if needed
             if decorrelate:
@@ -196,15 +119,15 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
                 max_distance = max(1, round(float(tau)))
                 n_decorr = max_distance if n_decorr is None else max(1, min(n_decorr, max_distance))
                 offsets = _np.random.choice(_np.arange(max_distance), size=n_decorr, replace=False)
-                all_indices = [sorted(range(self._last_total_interpol_memo_update - 1 - x, -1, -max_distance)) for x in offsets]
-                all_indices = self._time_to_mbar_indices(all_indices)
+                all_indices = [_np.arange(self.walker_memo.timesteps - 1 - x, -1, -max_distance)[::-1] for x in offsets]
+                all_indices = [self.walker_memo.time_to_mbar_indices(x) for x in all_indices]
             else:
                 all_indices = [_np.arange(u_kn.shape[1])]
 
             # get initial free energy estimates from previous calls to MBAR
             try:
-                indices = self._time_to_mbar_indices([list(range(self._last_total_interpol_memo_update))])[0][:self._fe_memo[key][-1][0]._u_kn.shape[1]]
-                u_kn_test = u_kn[:, _np.sort(indices)]
+                indices = self.walker_memo.time_to_walker_indices(_np.arange(self.walker_memo.timesteps))[:self._fe_memo[key][-1][0]._u_kn.shape[1]]
+                u_kn_test = u_kn[:, self.walker_memo.walker_to_mbar_indices(indices)]
                 old_fes = self._fe_memo[key][-1][0].computePerturbedFreeEnergies(u_kn_test, memo_key=tuple(lambdas))
                 kwargs["initial_f_k"] = old_fes - old_fes[0]
             except (KeyError, AttributeError, TypeError):
@@ -219,7 +142,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
                 indices_constr = indices[(indices < end_idx) & (indices >= start_idx)]
                 # bootstrap if needed
                 if n_bootstraps is not None:
-                    weights = self._total_interpol_memo["w"][indices]
+                    weights = self.walker_memo.weights[self.walker_memo.arg_mbar_indices][indices]
                     N_resample = _np.round(_np.sum(weights)).astype(_np.int)
                     weights /= _np.sum(weights)
                     train_indices = _np.random.choice(indices, size=(n_bootstraps, N_resample), p=weights)
@@ -240,17 +163,17 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
                         mbars += [None]
 
             # cache the free energies
-            u_kn_pert = self.energyMatrix(self.current_lambdas)
+            u_kn_pert = self.walker_memo.energyMatrix(self.current_lambdas)[:, self.walker_memo.arg_mbar_indices]
             for mbar in mbars:
                 if mbar is not None:
                     mbar.computePerturbedFreeEnergies(u_kn_pert, memo_key=tuple(self.current_lambdas))
 
             # update cache
-            effective_sample_size = self._last_total_interpol_memo_update
+            effective_sample_size = self.walker_memo.timesteps
             if decorrelate:
                 effective_sample_size //= max_distance
             increment = self.min_update_fe + round(effective_sample_size * (self.freq_update_fe))
-            next_fe_calculation = self._last_total_interpol_memo_update + increment
+            next_fe_calculation = self.walker_memo.timesteps + increment
             self._fe_memo[key] = next_fe_calculation, self.current_lambdas, mbars
 
         return self._fe_memo[key][1:]
@@ -322,7 +245,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             return _np.average([self.expectedTransitionMatrix(lambdas, x) for x in mbar], axis=0)
 
         # generate the energy distributions from the MBAR model
-        u_kn = self.energyMatrix(lambdas)
+        u_kn = self.walker_memo.energyMatrix(lambdas)[:, self.walker_memo.arg_mbar_indices]
         fes = mbar.computePerturbedFreeEnergies(u_kn)
         log_probabilities = -u_kn + fes.reshape(-1, 1)
 
@@ -498,10 +421,10 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         return protocol_curr, fun_curr, success
 
     def optimiseProtocol(self, start=None, end=None, **kwargs):
-        effective_sample_size = self._last_total_interpol_memo_update
+        effective_sample_size = self.walker_memo.timesteps
         if self._next_optimisation is None:
             self.current_lambdas = self.lambda_history[:self.lambda_history.index(1) + 1]
-        elif self._next_optimisation <= self._last_total_interpol_memo_update:
+        elif self._next_optimisation <= self.walker_memo.timesteps:
             start = 0 if start is None else start
             end = 1 if end is None else end
 
@@ -510,7 +433,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             if self.decorrelate_opt:
                 tau = self.effectiveDecorrelationTime()
                 max_distance = max(1, round(float(tau)))
-                effective_sample_size = self._last_total_interpol_memo_update // max_distance
+                effective_sample_size = self.walker_memo.timesteps // max_distance
 
             protocol, fun, success = self._discrete_optimise_protocol(start=start, end=end, **kwargs)
             if _np.isinf(fun) or _np.isnan(fun) or not success:
@@ -536,8 +459,8 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
             return
 
         increment = self.min_update_opt + round(effective_sample_size * (self.freq_opt))
-        self._next_optimisation = self._last_total_interpol_memo_update + increment
-        self._prev_optimisation_index = self._last_total_interpol_memo_update
+        self._next_optimisation = self.walker_memo.timesteps + increment
+        self._prev_optimisation_index = self.walker_memo.timesteps
         self._optimisation_memo += [self._prev_optimisation_index]
 
     def sample(self, *args, **kwargs):
@@ -554,7 +477,7 @@ class GlobalAdaptiveCyclicSMCSampler(_CyclicSMCSampler):
         else:
             super().sample(*args, **kwargs)
         if 1 in self.lambda_history:
-            self._update_interpol_memos()
+            self.walker_memo.updateWalkersAndEnergies(self.walkers, self, self.interpolatable_lambdas)
 
     def runSingleIteration(self, *args, **kwargs):
         if self.adaptive_mode:

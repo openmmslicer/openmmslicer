@@ -1,5 +1,11 @@
+from cached_property import cached_property as _cached_property
+import collections as _collections
 import math as _math
 
+import numpy as _np
+import pandas as _pd
+
+from slicer.interpolate import BatchLinearInterp as _BatchLinearInterp
 
 
 class LinearAlchemicalFunction:
@@ -77,3 +83,107 @@ class Walker:
 
     def resetCache(self):
         self._energy_cache = {}
+
+
+class WalkerMemo:
+    def __init__(self):
+        self._walker_memo = []
+        self._protocol_memo = []
+        self._energy_memo = []
+
+    @_cached_property
+    def interpolator(self):
+        return _BatchLinearInterp(self._protocol_memo, self._energy_memo)
+
+    @_cached_property
+    def iterations(self):
+        return _np.asarray([w.iteration for w in self.relevant_walkers])
+
+    @_cached_property
+    def lambdas(self):
+        return _np.asarray([w.lambda_ for w in self.relevant_walkers])
+
+    @_cached_property
+    def lambda_counts(self):
+        return _np.unique(self.lambdas, return_counts=True)[-1]
+
+    @_cached_property
+    def mbar_indices(self):
+        return _np.argsort(_np.concatenate([_np.where(self.lambdas == x)[0] for x in self.unique_lambdas]))
+
+    @_cached_property
+    def relevant_walkers(self):
+        return [w for w in self._walker_memo if w.lambda_ is not None and w.transform is None]
+
+    @_cached_property
+    def timesteps(self):
+        return self._sorted_unique_hashes.size
+
+    @_cached_property
+    def unique_lambdas(self):
+        return _np.unique(self.lambdas)
+
+    @property
+    def walkers(self):
+        return self._walker_memo
+
+    @_cached_property
+    def weights(self):
+        counters = _collections.Counter(self._hashes)
+        return _np.asarray([1. / counters[k] for k in self._hashes])
+
+    @_cached_property
+    def _hashes(self):
+        return _np.asarray([hash((i, lambda_)) for i, lambda_ in zip(self.iterations, self.lambdas)])
+
+    @_cached_property
+    def _sorted_unique_hashes(self):
+        # Returning sorted hashes with NumPy is more expensive
+        return _pd.unique(self._hashes)
+
+    def resetMemos(self):
+        for key, value in self.__class__.__dict__.items():
+            if isinstance(value, _cached_property):
+                self.__dict__.pop(key, None)
+
+    def removeWalkers(self, walkers):
+        if walkers:
+            indices = [i for i, w in enumerate(self._walker_memo) if w not in walkers]
+            self._walker_memo = [self._walker_memo[i] for i in indices]
+            self._protocol_memo = [self._protocol_memo[i] for i in indices if i < len(self._protocol_memo)]
+            self._energy_memo = [self._energy_memo[i] for i in indices if i < len(self._energy_memo)]
+            self.resetMemos()
+
+    def updateWalkers(self, walkers):
+        if walkers:
+            self.removeWalkers(walkers)
+            self._walker_memo += walkers
+            for walker in self._walker_memo:
+                if walker.state is not None and walker not in walkers:
+                    walker.state = None
+            self.resetMemos()
+
+    def updateEnergies(self, ensemble, lambdas):
+        walkers = self.relevant_walkers[len(self._protocol_memo):]
+        self._protocol_memo += [lambdas] * len(walkers)
+        self._energy_memo += ensemble.calculateStateEnergies(lambdas, walkers=walkers).T.tolist()
+
+    def updateWalkersAndEnergies(self, walkers, ensemble, lambdas):
+        self.updateWalkers(walkers)
+        self.updateEnergies(ensemble, lambdas)
+
+    def energyMatrix(self, lambdas=None):
+        if lambdas is None:
+            lambdas = self.unique_lambdas
+        return self.interpolator(_np.asarray(lambdas))
+
+    def walker_to_mbar_indices(self, indices):
+        return indices[_np.argsort(self.mbar_indices[indices])]
+
+    def time_to_walker_indices(self, indices):
+        relevant_hashes = self._sorted_unique_hashes[indices]
+        new_indices = _np.concatenate([_np.where(self._hashes == h)[0] for h in relevant_hashes])
+        return new_indices
+
+    def time_to_mbar_indices(self, indices):
+        return self.walker_to_mbar_indices(self.time_to_walker_indices(indices))
