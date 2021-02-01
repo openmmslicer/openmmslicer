@@ -5,4 +5,3 @@ numba
 numpy
 scipy
 pandas
-pymbar
