@@ -8,3 +8,4 @@ from . import resampling_metrics
 from . import resampling_methods
 from . import sampling_metrics
 from . import smc
+from . import transition_metrics
