@@ -1,26 +1,8 @@
-from math import isclose
 from mock import Mock
 
 import numpy as np
 
 from slicer.smc.global_adaptive import GlobalAdaptiveCyclicSMCSampler
-
-
-def test_expectedRoundTripTime():
-    # test described here: http://dx.doi.org/10.1080/0020739950260510
-    obj = Mock()
-    obj.decorrelationSteps.return_value = 1.
-    obj.expectedTransitionMatrix.return_value = np.asarray([
-        [.3, .1, .4, .2],
-        [.2, .5, .2, .1],
-        [.3, .2, .1, .4],
-        [0., .6, .3, .1],
-    ])
-    obj.expectedTransitionTime.side_effect = lambda *args, **kwargs: \
-        GlobalAdaptiveCyclicSMCSampler.expectedTransitionTime(obj, *args, **kwargs)
-    assert isclose(GlobalAdaptiveCyclicSMCSampler.expectedRoundTripTime(obj, [0, 0.5, 1]), 10.646234070290262)
-    obj.expectedTransitionMatrix.return_value = obj.expectedTransitionMatrix()[::-1, ::-1]
-    assert isclose(GlobalAdaptiveCyclicSMCSampler.expectedRoundTripTime(obj, [0, 0.5, 1]), 10.646234070290262)
 
 
 def test_continuous_optimise_protocol():
