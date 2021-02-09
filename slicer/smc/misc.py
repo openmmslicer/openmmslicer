@@ -1,5 +1,6 @@
 from cached_property import cached_property as _cached_property
 import collections as _collections
+from itertools import groupby as _groupby
 import math as _math
 
 import numpy as _np
@@ -116,12 +117,22 @@ class WalkerMemo:
         return [w for w in self._walker_memo if w.lambda_ is not None and w.transform is None]
 
     @_cached_property
+    def round_trips(self):
+        all_terminal = [x for x in self.timestep_lambdas[1:] if x in [0., 1.]]
+        all_terminal = [x[0] for x in _groupby(all_terminal)]
+        return (len(all_terminal) - 1) // 2
+
+    @_cached_property
     def timesteps(self):
         return self._sorted_unique_hashes.size
 
     @_cached_property
+    def timestep_lambdas(self):
+        return self.lambdas[self._hash_indices]
+
+    @_cached_property
     def unique_lambdas(self):
-        return _np.unique(self.lambdas)
+        return _np.sort(_pd.unique(self.lambdas))
 
     @property
     def walkers(self):

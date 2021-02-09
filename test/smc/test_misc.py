@@ -11,6 +11,8 @@ def test_WalkerMemo():
 
     expected_unique_lambdas = np.asarray([0, 0.5, 1])
     assert np.array_equal(walker_memo.unique_lambdas, expected_unique_lambdas)
+    expected_timestep_lambdas = np.asarray([0, 1, 0.5, 1, 0, 1])
+    assert np.array_equal(walker_memo.timestep_lambdas, expected_timestep_lambdas)
     expected_mbar_indices = np.asarray([0, 5, 2, 3, 4, 6, 1, 7])
     assert np.array_equal(walker_memo.mbar_indices, expected_mbar_indices)
 

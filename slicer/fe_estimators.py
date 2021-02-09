@@ -519,10 +519,11 @@ class EnsembleMBAR(MBAR):
 
     @property
     def interval(self):
-        if self._interval is None or _np.isnan(self._interval) or _np.isinf(self._interval):
+        val = self._interval() if callable(self._interval) else self._interval
+        if val is None or _np.isnan(val) or _np.isinf(val):
             return 1
         else:
-            return max(1, int(round(float(self._interval))))
+            return max(1, int(round(float(val))))
 
     @interval.setter
     def interval(self, val):
