@@ -367,6 +367,10 @@ class AbstractFEEstimator(_abc.ABC):
         self.walker_memo = walker_memo
         self.update_func = update_func
 
+    @property
+    def effective_sample_size(self):
+        return self.walker_memo.timesteps
+
     @_abc.abstractmethod
     def __call__(self, *args, **kwargs):
         pass
