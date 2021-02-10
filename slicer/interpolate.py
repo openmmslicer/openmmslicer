@@ -4,9 +4,10 @@ import numpy as _np
 
 @_nb.guvectorize(
     [(_nb.float64[:], _nb.float64[:, :], _nb.float64[:, :], _nb.float64[:, :])],
-    '(k),(m, n),(m, n)->(k, m)', nopython=True, target='cpu'
+    '(k),(m, n),(m, n)->(k, m)', nopython=True, target='cpu', fastmath=True, cache=True
 )
-def interp_vectorised(x, xp, yp, res):
+def _interp_vectorised(x, xp, yp, res):
+    # TODO: generalise to extrapolation
     for i in _nb.prange(len(xp)):
         for j in _nb.prange(len(x)):
             # binary search which assumes xp is sorted and has unique values
@@ -49,5 +50,5 @@ class BatchLinearInterp:
         x_interp = _np.asarray(x_interp)
         res = _np.empty((len(x_interp), self.n_samples))
         for (_, indices), x, y in zip(self.dimensional_indices, self.xs, self.ys):
-            res[:, indices] = interp_vectorised(x_interp, x, y)
+            res[:, indices] = _interp_vectorised(x_interp, x, y)
         return res

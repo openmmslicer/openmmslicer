@@ -4,38 +4,48 @@ import math as _math
 import random as _random
 
 import numpy as _np
+from scipy.interpolate import interp1d as _interp1d
 import simtk.unit as _unit
 
-from .generic import GenericSMCSampler as _GenericSMCSampler
+from .smc import SMCSampler as _SMCSampler
+from slicer.correlation_metrics import EffectiveDecorrelationTime as _EffectiveDecorrelationTime
 import slicer.fe_estimators as _fe_estimators
 import slicer.resampling_methods as _resmethods
+from slicer.protocol import Protocol as _Protocol
 
 _logger = _logging.getLogger(__name__)
 
 
-class CyclicSMCSampler(_GenericSMCSampler):
+class STSampler(_SMCSampler):
     # TODO: make pickle work
-    _picklable_attrs = _GenericSMCSampler._picklable_attrs + ["target_lambda", "N_opt", "adaptive_mode",
-                                                              "sampling_history", "fe_estimator"]
+    # TODO: fix protocol
+    _picklable_attrs = _SMCSampler._picklable_attrs + ["target_lambda", "adaptive_mode",
+                                                       "sampling_history", "fe_estimator"]
 
-    def __init__(self, *args, fe_estimator=_fe_estimators.BAR, **kwargs):
-        self._target_lambda = 1
-        self.N_opt = None
-        self.adaptive_mode = True
-        self.sampling_history = []
-        self.fe_estimator = fe_estimator
+    def __init__(self, *args, fe_estimator=_fe_estimators.EnsembleBAR, n_bootstraps=None, n_decorr=None,
+                 fe_update_func=lambda self: 1 + 0.01 * self.effective_sample_size, parallel=False,
+                 significant_figures=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self._target_lambda = 1
+        self.adaptive_mode = True
+        # TODO: make sampling_history part of walker_memo
+        self.sampling_history = []
+        self.fe_estimator = None
+        self.protocol = None
+        self._post_adaptive_kwargs = dict(fe_estimator=fe_estimator, n_bootstraps=n_bootstraps, n_decorr=n_decorr,
+                                          fe_update_func=fe_update_func, parallel=parallel,
+                                          significant_figures=significant_figures)
 
     @property
-    def current_lambdas(self):
-        return self.lambda_history[:self.lambda_history.index(1) + 1]
+    def adaptive_mode(self):
+        return self._adaptive_mode
 
-    @property
-    def cycles(self):
-        from itertools import groupby
-        all_terminal = [x for x in self.lambda_history[1:] if x in [0., 1.]]
-        all_terminal = [x[0] for x in groupby(all_terminal)]
-        return (len(all_terminal) - 1) // 2
+    @adaptive_mode.setter
+    def adaptive_mode(self, val):
+        if not val:
+            self._initialise_fe_estimator()
+            self._initialise_protocol()
+        self._adaptive_mode = val
 
     @property
     def fe_estimator(self):
@@ -43,9 +53,50 @@ class CyclicSMCSampler(_GenericSMCSampler):
 
     @fe_estimator.setter
     def fe_estimator(self, val):
-        if not issubclass(val, _fe_estimators.AbstractFEEstimator):
-            raise TypeError("The free energy estimator must be inherited from the abstract base class")
-        self._fe_estimator = val(self)
+        if val is None:
+            self._fe_estimator = val
+        elif _inspect.isclass(val):
+            if not issubclass(val, _fe_estimators.AbstractFEEstimator):
+                raise TypeError("The free energy estimator must be inherited from the abstract base class")
+            self._fe_estimator = val(self.walker_memo)
+        else:
+            if not isinstance(val, _fe_estimators.AbstractFEEstimator):
+                raise TypeError("The free energy estimator must be inherited from the abstract base class")
+            self._fe_estimator = val
+            val.walker_memo = self.walker_memo
+
+    @_SMCSampler.lambda_.setter
+    def lambda_(self, val):
+        if val is not None:
+            if self._post_adaptive_kwargs["significant_figures"] is not None:
+                val = round(val, self._post_adaptive_kwargs["significant_figures"])
+            _SMCSampler.lambda_.fset(self, val)
+
+    @property
+    def next_lambda(self):
+        if self.protocol is None:
+            return None
+        idx = _np.where(_np.isclose(self.protocol.value, self.lambda_, rtol=1e-8))[0][0]
+        sign = 1 if self.lambda_ != 1 and (self.target_lambda > self.lambda_ or self.lambda_ == 0) else -1
+        return self.protocol.value[idx + sign]
+
+    @property
+    def previous_lambda(self):
+        if self.protocol is None:
+            return None
+        idx = _np.where(_np.isclose(self.protocol.value, self.lambda_, rtol=1e-8))[0][0]
+        sign = -1 if self.lambda_ != 0 and (self.target_lambda > self.lambda_ or self.lambda_ == 1) else 1
+        return self.protocol.value[idx + sign]
+
+    @property
+    def protocol(self):
+        return self._protocol
+
+    @protocol.setter
+    def protocol(self, val):
+        self._protocol = val
+        if isinstance(self.fe_estimator, _fe_estimators.EnsembleMBAR) and self._post_adaptive_kwargs["n_decorr"]:
+            self._fe_estimator._interval.protocol = val
 
     @property
     def target_lambda(self):
@@ -56,26 +107,53 @@ class CyclicSMCSampler(_GenericSMCSampler):
         assert val in [0, 1], "The target lambda must be one of the terminal lambda states"
         self._target_lambda = val
 
+    @_SMCSampler.walkers.setter
+    def walkers(self, val):
+        if self.protocol is None:
+            self.walker_memo.updateWalkers(val)
+        else:
+            self.walker_memo.updateWalkersAndEnergies(val, self, self.protocol.value)
+        self._walkers = val
+
+    def _initialise_protocol(self):
+        idx = _np.where(self.walker_memo.timestep_lambdas == 1)[0][0]
+        self.protocol = _Protocol(self.walker_memo.timestep_lambdas[:idx + 1],
+                                  significant_figures=self._post_adaptive_kwargs["significant_figures"])
+        self.walker_memo.updateEnergies(self, self.protocol.value)
+
+    def _initialise_fe_estimator(self):
+        fe_estimator = self._post_adaptive_kwargs["fe_estimator"]
+        if _inspect.isclass(fe_estimator):
+            if self._post_adaptive_kwargs["n_bootstraps"] or self._post_adaptive_kwargs["n_decorr"]:
+                if fe_estimator is _fe_estimators.BAR:
+                    fe_estimator = _fe_estimators.EnsembleBAR
+                elif fe_estimator is _fe_estimators.MBAR:
+                    fe_estimator = _fe_estimators.EnsembleMBAR
+                kwargs = dict(n_bootstraps=self._post_adaptive_kwargs["n_bootstraps"],
+                              n_decorr=self._post_adaptive_kwargs["n_decorr"],
+                              update_func=self._post_adaptive_kwargs["fe_update_func"],
+                              parallel=self._post_adaptive_kwargs["parallel"])
+            else:
+                kwargs = dict(update_func=self._post_adaptive_kwargs["fe_update_func"],
+                              parallel=self._post_adaptive_kwargs["parallel"])
+            fe_estimator = fe_estimator(self.walker_memo, **kwargs)
+            if self._post_adaptive_kwargs["n_decorr"]:
+                fe_estimator.interval = _EffectiveDecorrelationTime(fe_estimator=fe_estimator,
+                                                                    protocol=self.protocol)
+        self.fe_estimator = fe_estimator
+
     def decorrelationSteps(self, lambda_=None):
+        if self.protocol is None:
+            return None
+        protocol = self.walker_memo.timestep_lambdas[:_np.where(self.walker_memo.timestep_lambdas == 1)[0][0] + 1]
         if lambda_ is None:
             lambda_ = self.lambda_
-        if not 0 <= lambda_ <= 1:
-            raise ValueError("Lambda must be between 0 and 1")
-        if 0 not in self.lambda_history and 1 not in self.lambda_history:
-            return None
-        lambdas = self.lambda_history[:len(self.sampling_history)]
-        if any(_math.isclose(x, lambda_) for x in lambdas):
-            return next(y for x, y in zip(lambdas, self.sampling_history) if _math.isclose(x, lambda_))
-        i_prev, i_next = next((i - 1, i) for i, x in enumerate(lambdas) if x >= lambda_)
-        x1, x2 = self.lambda_history[i_prev], self.lambda_history[i_next]
-        y1, y2 = self.sampling_history[i_prev], self.sampling_history[i_next]
-        decorrelation_steps = int((y2 - y1) / (x2 - x1) * (lambda_ - x1) + y1)
-        return decorrelation_steps
+        return _np.round(_interp1d(protocol, self.sampling_history)(lambda_)).astype(int)
 
     def sample(self, *args, reporter_filename=None, **kwargs):
         if reporter_filename is None:
             if self.adaptive_mode:
-                reporter_filename = "{}_adapt".format(round(self.lambda_, 8))
+                reporter_filename = f"{round(self.lambda_, 8)}_adapt"
                 kwargs["append"] = False
             else:
                 reporter_filename = str(round(self.lambda_, 8))
@@ -87,38 +165,31 @@ class CyclicSMCSampler(_GenericSMCSampler):
         if self.adaptive_mode:
             return super().reweight(*args, **kwargs)
 
-        # get the protocol schedule from the adaptive step
-        idx = next(i for i, x in enumerate(self.current_lambdas) if _math.isclose(x, self.lambda_))
-        sign = -1 if self.lambda_ != 0 and (self.target_lambda > self.lambda_ or self.lambda_ == 1) else 1
-        prev_lambda = self.current_lambdas[(idx + sign)]
-        sign = 1 if self.lambda_ != 1 and (self.target_lambda > self.lambda_ or self.lambda_ == 0) else -1
-        next_lambda = self.current_lambdas[(idx + sign)]
-
         # get acceptance criterion
-        fe_fwd = self.fe_estimator(next_lambda, self.lambda_)
-        deltaEs_fwd = self.calculateDeltaEs(next_lambda, self.lambda_)
+        fe_fwd = self.fe_estimator(self.lambda_, self.next_lambda)
+        deltaEs_fwd = self.calculateDeltaEs(self.next_lambda, self.lambda_)
         samples_fwd = _np.sum(_np.meshgrid(fe_fwd, -deltaEs_fwd), axis=0)
         acc_fwd = _np.average(_np.exp(_np.minimum(samples_fwd, 0.)))
-        _logger.debug("Forward probability to lambda = {} is {} with dimensionless free energy = {}".format(
-            next_lambda, acc_fwd, fe_fwd))
+        _logger.debug(f"Forward probability to lambda = {self.next_lambda} is {acc_fwd} with dimensionless "
+                      f"free energy = {fe_fwd}")
         
         # accept or reject move and/or swap direction
         randnum = _random.random()
         if acc_fwd != 1. and randnum >= acc_fwd:
-            if not _math.isclose(next_lambda, prev_lambda):
-                fe_bwd = self.fe_estimator(prev_lambda, self.lambda_)
-                deltaEs_bwd = self.calculateDeltaEs(prev_lambda, self.lambda_)
+            if not _math.isclose(self.next_lambda, self.previous_lambda):
+                fe_bwd = self.fe_estimator(self.lambda_, self.previous_lambda)
+                deltaEs_bwd = self.calculateDeltaEs(self.previous_lambda, self.lambda_)
                 samples_bwd = _np.sum(_np.meshgrid(fe_bwd, -deltaEs_bwd), axis=0)
                 acc_bwd = max(0., _np.average(_np.exp(_np.minimum(samples_bwd, 0.))) - acc_fwd)
-                _logger.debug("Backward probability to lambda = {} is {} with dimensionless free energy = {}".format(
-                    prev_lambda, acc_bwd, fe_bwd))
+                _logger.debug(f"Backward probability to lambda = {self.previous_lambda} is {acc_bwd} with "
+                              f"dimensionless free energy = {fe_bwd}")
 
                 if acc_bwd != 0. and randnum - acc_fwd < acc_bwd:
                     self.target_lambda = int(not self.target_lambda)
             # trigger walker update
             self.lambda_ = self.lambda_
         else:
-            self.lambda_ = next_lambda
+            self.lambda_ = self.next_lambda
 
         return self.lambda_
 
@@ -194,17 +265,18 @@ class CyclicSMCSampler(_GenericSMCSampler):
                 break
             if n_cycles is not None and current_cycle >= n_cycles:
                 break
-            self._runCycle(*args, maximum_duration=maximum_duration, **kwargs)
+            self._runRoundTrip(*args, maximum_duration=maximum_duration, **kwargs)
             current_cycle += 1
 
-            lambdas = self.current_lambdas
-            fe = sum(self.fe_estimator(lambdas[i + 1], lambdas[i]) for i in range(len(lambdas) - 1))
+            lambdas = self.protocol.value
+            fe = sum(self.fe_estimator(lambdas[i], lambdas[i + 1]) for i in range(len(lambdas) - 1))
             _logger.info("Dimensionless free energy difference (-logZ) between lambda = 0 and lambda = 1 is: {}".
                          format(fe))
 
-        _logger.info("Grand total simulation time was {}".format(dt))
+        _logger.info(f"Grand total simulation time was {dt}")
 
     def runSingleIteration(self, *args, **kwargs):
+        # TODO: restructure
         if not self.adaptive_mode:
             self._runPostAdaptiveIteration(*args, **kwargs)
         else:
@@ -215,6 +287,17 @@ class CyclicSMCSampler(_GenericSMCSampler):
                 else:
                     # TODO: fix
                     kwargs["n_walkers"] = len(self.walkers)
+            significant_figures = self._post_adaptive_kwargs["significant_figures"]
+            if significant_figures is not None:
+                minimum_value = 1. / 10 ** significant_figures
+                for key in ["default_dlambda", "minimum_dlambda", "maximum_dlambda", "target_lambda"]:
+                    if key in kwargs.keys():
+                        kwargs[key] = _np.sign(kwargs[key]) * max(minimum_value, round(abs(kwargs[key]),
+                                                                                       significant_figures))
+            if "fixed_lambdas" not in kwargs.keys() or kwargs["fixed_lambdas"] is None:
+                kwargs["fixed_lambdas"] = []
+            else:
+                kwargs["fixed_lambdas"] = sorted(set(kwargs["fixed_lambdas"]))
             super().runSingleIteration(*args, **kwargs)
             self.sampling_history += [(self.total_sampling_steps - steps_before) // kwargs["n_walkers"]]
 
@@ -230,12 +313,12 @@ class CyclicSMCSampler(_GenericSMCSampler):
                                   write_checkpoint=None,
                                   load_checkpoint=None):
         if resampling_method is None:
-            raise ValueError("Resampling must be performed after the adaptative cycle")
+            raise ValueError("Resampling must be performed after the adaptive cycle")
 
         # get next lambda and decorrelation time
         prev_lambda = self.lambda_
         self.reweight()
-        next_decorr = self.decorrelationSteps()
+        next_decorr = int(self.decorrelationSteps())
 
         # get next number of walkers, if applicable
         if walker_metric is not None:
@@ -251,8 +334,7 @@ class CyclicSMCSampler(_GenericSMCSampler):
                 exact_weights=exact_weights,
             )
 
-        _logger.info("Sampling {} walkers at lambda = {:.8g} for {} steps per walker...".format(
-            n_walkers, self.lambda_, next_decorr))
+        _logger.info(f"Sampling {n_walkers} walkers at lambda = {self.lambda_} for {next_decorr} steps per walker...")
 
         # generate uncorrelated samples
         self.sample(
@@ -270,9 +352,9 @@ class CyclicSMCSampler(_GenericSMCSampler):
         )
 
         if self.current_trajectory_filename is not None:
-            _logger.info("Trajectory path: \"{}\"".format(self.current_trajectory_filename))
+            _logger.info(f"Trajectory path: \"{self.current_trajectory_filename}\"")
 
-    def _runCycle(self, *args, maximum_duration=None, **kwargs):
+    def _runRoundTrip(self, *args, maximum_duration=None, **kwargs):
         def runOnce():
             self.runSingleIteration(*args, **kwargs)
             if self.lambda_ == self.target_lambda:
@@ -297,6 +379,6 @@ class CyclicSMCSampler(_GenericSMCSampler):
             if finished_half_cycle and self.lambda_ == int(not initial_target_lambda):
                 d_steps = self.total_sampling_steps - initial_sampling_steps
                 time = d_steps * self.integrator.getStepSize().in_units_of(_unit.nanosecond)
-                _logger.info("Cycle from lambda = {} to lambda = {} finished after {} of cumulative sampling".format(
-                    initial_lambda_, self.lambda_, time))
+                _logger.info(f"Round trip from lambda = {initial_lambda_} to lambda = {self.lambda_} finished after "
+                             f"{time} of cumulative sampling")
                 break

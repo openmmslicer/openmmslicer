@@ -1,6 +1,7 @@
 import abc as _abc
 from collections import defaultdict as _defaultdict
 import logging as _logging
+import warnings as _warnings
 
 from cached_property import cached_property as _cached_property
 import numba as _nb
@@ -247,14 +248,16 @@ class MBARResult:
 
     @staticmethod
     def _cast(arr, expected_dimensions):
-        try:
-            arr_return = _np.asarray(arr)
-            if arr_return.dtype == 'object':
-                raise ValueError
-        except ValueError:
-            arr_return = [_np.asarray(x) for x in arr]
-            if any(len(x.shape) != expected_dimensions for x in arr_return):
-                raise ValueError("Need to pass a 2D or a 3D array or a nested list of 2D arrays")
+        with _warnings.catch_warnings():
+            _warnings.filterwarnings('ignore')
+            try:
+                arr_return = _np.asarray(arr)
+                if arr_return.dtype == 'object':
+                    raise ValueError
+            except ValueError:
+                arr_return = [_np.asarray(x) for x in arr]
+                if any(len(x.shape) != expected_dimensions for x in arr_return):
+                    raise ValueError("Need to pass a 2D or a 3D array or a nested list of 2D arrays")
         return arr_return
 
     @staticmethod
@@ -298,35 +301,28 @@ class MBARResult:
         return self._log_weights
 
     def computeFreeEnergies(self, lambdas, energy=None):
-        # pre-sort the lambdas for convenience
-        argsort = _np.argsort(lambdas)
-        lambdas = _np.asarray(lambdas)[argsort]
+        lambdas = _np.ravel(lambdas)
 
-        # retrieve the cached free energies and calculate the uncached ones
-        if self._single_model:
-            fes = _np.zeros(lambdas.size)
-        else:
-            fes = _np.zeros((len(self.log_weights), lambdas.size))
-        fes[..., _np.isin(lambdas, self._lambda_memo)] = self._free_energy_memo[..., _np.isin(self._lambda_memo, lambdas)]
-        indices_uncached = _np.isin(lambdas, self._lambda_memo, invert=True)
-        lambdas_uncached = lambdas[indices_uncached]
-        if lambdas_uncached.size:
+        # calculate the uncached free energies, if applciable
+        indices_uncached = _np.where(_np.isin(lambdas, self._lambda_memo, invert=True))[0]
+        if indices_uncached.size:
             if energy is None:
                 raise ValueError("Need to pass energy in order to calculate uncached free energies")
             else:
                 energy = self._cast(energy, 2)
                 self._validate(energy, lambdas=lambdas)
 
+            lambdas_uncached, unique_indices = _np.unique(lambdas[indices_uncached], return_index=True)
+            indices_uncached = indices_uncached[unique_indices]
+
             if self._single_model:
-                fes_uncached = _compute_free_energies_numba(energy[argsort[indices_uncached], :], self.log_weights,
+                fes_uncached = _compute_free_energies_numba(energy[indices_uncached, :], self.log_weights,
                                                             parallel=self.parallel)
             else:
-                fes_uncached = [_compute_free_energies_numba(energy[i][argsort[indices_uncached], :],
+                fes_uncached = [_compute_free_energies_numba(energy[i][indices_uncached, :],
                                                              self._log_weights[i], parallel=self.parallel)
                                 for i in range(len(self.log_weights))]
                 fes_uncached = self._cast(fes_uncached, 1)
-
-            fes[..., indices_uncached] = fes_uncached
 
             # update the cache with the uncached free energies
             lambda_memo_new = _np.concatenate([self._lambda_memo, lambdas_uncached])
@@ -336,7 +332,15 @@ class MBARResult:
             self._free_energy_memo = free_energy_memo_new[..., argsort_cache]
 
         # restore the original order of the free energies and return
-        fes = fes[..., _np.argsort(argsort)]
+        if self._single_model:
+            fes = _np.zeros(lambdas.size)
+        else:
+            fes = _np.zeros((len(self.log_weights), lambdas.size))
+        #fes = _np.asarray([self._free_energy_memo[..., _np.where(self._lambda_memo == x)[0][0]] for x in lambdas]).T
+        #if self._single_model:
+        #    fes = fes[0]
+        for i, lambda_ in _np.ndenumerate(lambdas):
+            fes[..., i] = self._free_energy_memo[..., _np.where(self._lambda_memo == lambda_)[0]]
         return fes
 
     def computeExpectations(self, observable, energy=None, free_energy=None):
@@ -363,7 +367,7 @@ class MBARResult:
 
 
 class AbstractFEEstimator(_abc.ABC):
-    def __init__(self, walker_memo, update_func=lambda self: self.walker_memo.timesteps + 1):
+    def __init__(self, walker_memo, update_func=lambda self: 1):
         self.walker_memo = walker_memo
         self.update_func = update_func
 
@@ -549,7 +553,7 @@ class EnsembleMBAR(MBAR):
             custom_indices = []
             for indices in final_indices:
                 weights = self.walker_memo.weights[indices]
-                size = _np.round(_np.sum(weights))
+                size = int(_np.round(_np.sum(weights)))
                 weights /= _np.sum(weights)
                 custom_indices += [_np.random.choice(indices, size=size, p=weights) for _ in range(self.n_bootstraps)]
         final_indices = custom_indices
@@ -567,7 +571,7 @@ class EnsembleMBAR(MBAR):
     def _partition_from_indices(arr, indices):
         arr = _np.asarray(arr)
         if len(set(x.shape for x in indices)) == 1:
-            arr_new = _np.empty((len(indices), *arr.shape))
+            arr_new = _np.empty((len(indices), *arr.shape[:-1], indices[0].size))
         else:
             arr_new = [None] * len(indices)
         for i, batch in enumerate(indices):

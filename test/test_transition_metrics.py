@@ -3,7 +3,7 @@ from mock import Mock
 import numpy as np
 
 from slicer.fe_estimators import MBAR
-from slicer.smc.misc import WalkerMemo
+from slicer.samplers.misc import WalkerMemo
 from slicer.transition_metrics import *
 
 

@@ -1,7 +1,7 @@
 from mock import Mock
 import numpy as np
 
-from slicer.smc.misc import WalkerMemo
+from slicer.samplers.misc import WalkerMemo
 from slicer.fe_estimators import MBARResult, MBAR, BAR, EnsembleMBAR, EnsembleBAR
 
 walker_memo = Mock()

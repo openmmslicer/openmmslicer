@@ -10,7 +10,7 @@ def test_optimiseContinuous(mockExpectedRoundTripTime):
     mockExpectedRoundTripTime.side_effect = lambda x, *args, **kwargs: np.average((x - 0.44) ** 2)
     obj = Mock()
     obj._protocol_memo = {}
-    obj.value = np.linspace(0., 0.3, num=3).tolist() + [1.]
+    obj._value = np.linspace(0., 0.3, num=3).tolist() + [1.]
     obj._initial_protocol_guess.side_effect = lambda *args, **kwargs: OptimisableProtocol._initial_protocol_guess(
         obj, *args, **kwargs)
     obj._augment_fixed_values.return_value = []
@@ -42,13 +42,13 @@ def test_optimiseDiscrete():
     obj._augment_fixed_values.return_value = []
     obj.optimiseContinuous.side_effect = lambda x, **kwargs: (int(x), int(x) ** 2 - 8 * int(x), True)
 
-    obj.value = [0.]
+    obj._value = [0.]
     x, y, success = OptimisableProtocol.optimiseDiscrete(obj)
     assert success
     assert x == 4
     assert y == -16
 
-    obj.value = [0.] * 10
+    obj._value = [0.] * 10
     x, y, success = OptimisableProtocol.optimiseDiscrete(obj)
     assert success
     assert x == 4

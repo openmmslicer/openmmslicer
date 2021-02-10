@@ -34,6 +34,8 @@ class Protocol:
 
     @value.setter
     def value(self, val):
+        if val is None or not len(val):
+            val = []
         self._value = self._round(sorted(set(val) | set(self.fixed_values)))
 
     def _round(self, val):
@@ -44,7 +46,7 @@ class Protocol:
 
 
 class OptimisableProtocol(Protocol):
-    def __init__(self, *args, ensemble,
+    def __init__(self, ensemble, *args,
                  update_func=lambda self: 100 + 0.1 * self.ensemble.fe_estimator.effective_sample_size, **kwargs):
         self.update_func = update_func
         self.ensemble = ensemble
@@ -53,7 +55,7 @@ class OptimisableProtocol(Protocol):
         self._next_optimisation = self._prev_optimisation + self.update_func(self)
         super().__init__(*args, **kwargs)
 
-    @property
+    @Protocol.fixed_values.getter
     def fixed_values(self):
         return _np.asarray(sorted(set(self._fixed_values) | {self._round(self.ensemble.lambda_)}))
 
@@ -66,7 +68,7 @@ class OptimisableProtocol(Protocol):
     def _augment_fixed_values(self, fixed_values=None, start=0., end=1.):
         if fixed_values is None:
             fixed_values = self.fixed_values
-        fixed_values = set(fixed_values) | {x for x in self.value if not start < x < end} | {self.ensemble.lambda_}
+        fixed_values = set(fixed_values) | {x for x in self._value if not start < x < end} | {self.ensemble.lambda_}
         return _np.asarray(sorted(fixed_values))
 
     def _initial_protocol_guess(self, n, fixed_values=None):
@@ -79,7 +81,7 @@ class OptimisableProtocol(Protocol):
         elif any(k for k in self._protocol_memo.keys() if k < n):
             protocol = self._protocol_memo[sorted(k for k in self._protocol_memo.keys() if k < n)[-1]]
         else:
-            protocol = self.value
+            protocol = self._value
         protocol = list(_interp1d(_np.linspace(0., 1., num=len(protocol)), protocol)(_np.linspace(0., 1., num=n)))
         for lambda_ in fixed_values:
             protocol.remove(min(protocol, key=lambda x: abs(x - lambda_)))
@@ -92,10 +94,10 @@ class OptimisableProtocol(Protocol):
             min_lambda = max_lambda = self.ensemble.lambda_
         else:
             min_lambda, max_lambda = min(lambdas_recent), max(lambdas_recent)
-        min_lambda_idx = _np.where(self.value == min_lambda)[0][0]
-        max_lambda_idx = _np.where(self.value == max_lambda)[0][0]
-        left = self.value[max(0, min_lambda_idx - 1)]
-        right = self.value[min(max_lambda_idx + 1, len(self.value) - 1)]
+        min_lambda_idx = _np.where(self._value == min_lambda)[0][0]
+        max_lambda_idx = _np.where(self._value == max_lambda)[0][0]
+        left = self._value[max(0, min_lambda_idx - 1)]
+        right = self._value[min(max_lambda_idx + 1, len(self._value) - 1)]
         return left, right
 
     def optimiseContinuous(self, n_opt, fixed_values=None, start=0., end=1., tol=1e-3, **kwargs):
@@ -119,7 +121,9 @@ class OptimisableProtocol(Protocol):
 
         def f(x):
             x = convert_x(x)
-            y = _ExpectedRoundTripTime(self.ensemble.fe_estimator).expectedRoundTripTime(x, lambda0=start, lambda1=end)
+            costs = self.ensemble.decorrelationSteps(x)
+            y = _ExpectedRoundTripTime(self.ensemble.fe_estimator).expectedRoundTripTime(x, lambda0=start, lambda1=end,
+                                                                                         costs=costs)
             return y
 
         N = max(n_opt, 0)
@@ -176,7 +180,7 @@ class OptimisableProtocol(Protocol):
             return self.optimiseContinuous(n, fixed_values=fixed_values, start=start, end=end, **kwargs)
 
         # minimise the number of lambda windows
-        N_adapt = len([x for x in self.value if x not in fixed_values])
+        N_adapt = len([x for x in self._value if x not in fixed_values])
         while True:
             protocol_list = [(N_adapt + i, *optfunc(N_adapt + i)) for i in [0, 1, -1]]
             min_protocol = min(protocol_list, key=lambda x: x[2])
@@ -203,7 +207,7 @@ class OptimisableProtocol(Protocol):
             self.value = protocol
             tau = fun * self.ensemble.integrator.getStepSize().in_units_of(_unit.nanosecond)
             _logger.info(f"The optimal protocol after adaptation between lambda = {start} and lambda = {end} with "
-                         f"an expected round trip time of {tau} is: {self.value}")
+                         f"an expected round trip time of {tau} is: {self._value}")
         else:
             _logger.info("Optimisation failed, most likely due to undersampling. Proceeding with current "
                          "protocol...")

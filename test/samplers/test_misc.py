@@ -1,6 +1,6 @@
 import numpy as np
 
-from slicer.smc.misc import *
+from slicer.samplers.misc import *
 
 
 def test_WalkerMemo():
