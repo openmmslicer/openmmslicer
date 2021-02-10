@@ -148,6 +148,11 @@ class WalkerMemo:
         return _np.asarray([hash((i, lambda_)) for i, lambda_ in zip(self.iterations, self.lambdas)])
 
     @_cached_property
+    def _hash_indices(self):
+        _, indices = _np.unique(self._hashes, return_index=True)
+        return _np.sort(indices)
+
+    @_cached_property
     def _sorted_unique_hashes(self):
         # Returning sorted hashes with NumPy is more expensive
         return _pd.unique(self._hashes)
