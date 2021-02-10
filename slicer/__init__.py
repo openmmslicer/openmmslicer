@@ -1,4 +1,5 @@
 # TODO: update docstrings
+# TODO: use fstrings everywhere
 from . import alchemy
 from . import correlation_metrics
 from . import fe_estimators
@@ -9,5 +10,5 @@ from . import resampling_metrics
 from . import resampling_methods
 from . import protocol
 from . import sampling_metrics
-from . import smc
+from . import samplers
 from . import transition_metrics

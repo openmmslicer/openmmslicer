@@ -1,7 +1,9 @@
-from slicer.integrators import AlchemicalLangevinIntegrator
+from openmmtools.integrators import LangevinIntegrator
+
+
 from slicer.moves import TranslationMove, RotationMove, DihedralMove
 from slicer.resampling_metrics import WorstCaseSampleSize
-from slicer.smc import GenericSMCSampler
+from slicer.samplers import SMCSampler
 
 import logging
 logging.basicConfig(level=logging.INFO)
@@ -29,11 +31,11 @@ md_config = {
 }
 
 # set up integrator, platform, system and minimise
-integrator = AlchemicalLangevinIntegrator(temperature=298.*unit.kelvin,
-                                          collision_rate=1./unit.picoseconds,
-                                          timestep=2.*unit.femtoseconds)
+integrator = LangevinIntegrator(temperature=298.*unit.kelvin,
+                                collision_rate=1./unit.picoseconds,
+                                timestep=2.*unit.femtoseconds)
 platform = "CUDA"
-ensemble = GenericSMCSampler(gro, structure, integrator, moves=moves, platform=platform, md_config=md_config)
+ensemble = SMCSampler(gro, structure, integrator, moves=moves, platform=platform, md_config=md_config)
 ensemble.simulation.minimizeEnergy()
 
 # run simulation

@@ -1,4 +1,5 @@
 from cached_property import cached_property as _cached_property
+import cachetools as _cachetools
 import collections as _collections
 from itertools import groupby as _groupby
 import math as _math
@@ -91,10 +92,11 @@ class WalkerMemo:
         self._walker_memo = []
         self._protocol_memo = []
         self._energy_memo = []
+        self._energy_matrix_memo = _cachetools.LRUCache(maxsize=1)
 
     @_cached_property
     def interpolator(self):
-        return _BatchLinearInterp(self._protocol_memo, self._energy_memo)
+        return _BatchLinearInterp(self._protocol_memo, self._energy_memo, sort=False)
 
     @_cached_property
     def iterations(self):
@@ -114,13 +116,13 @@ class WalkerMemo:
 
     @_cached_property
     def relevant_walkers(self):
-        return [w for w in self._walker_memo if w.lambda_ is not None and w.transform is None]
+        return [w for w in self._walker_memo if w.lambda_ is not None]
 
     @_cached_property
     def round_trips(self):
         all_terminal = [x for x in self.timestep_lambdas[1:] if x in [0., 1.]]
         all_terminal = [x[0] for x in _groupby(all_terminal)]
-        return (len(all_terminal) - 1) // 2
+        return max(0, (len(all_terminal) - 1) // 2)
 
     @_cached_property
     def timesteps(self):
@@ -161,6 +163,7 @@ class WalkerMemo:
         for key, value in self.__class__.__dict__.items():
             if isinstance(value, _cached_property):
                 self.__dict__.pop(key, None)
+        self._energy_matrix_memo.clear()
 
     def removeWalkers(self, walkers):
         if walkers:
@@ -181,13 +184,14 @@ class WalkerMemo:
 
     def updateEnergies(self, ensemble, lambdas):
         walkers = self.relevant_walkers[len(self._protocol_memo):]
-        self._protocol_memo += [lambdas] * len(walkers)
+        self._protocol_memo += [_np.sort(lambdas)] * len(walkers)
         self._energy_memo += ensemble.calculateStateEnergies(lambdas, walkers=walkers).T.tolist()
 
     def updateWalkersAndEnergies(self, walkers, ensemble, lambdas):
         self.updateWalkers(walkers)
         self.updateEnergies(ensemble, lambdas)
 
+    @_cachetools.cachedmethod(lambda self: self._energy_matrix_memo, key=lambda lambdas=None: tuple(lambdas))
     def energyMatrix(self, lambdas=None):
         if lambdas is None:
             lambdas = self.unique_lambdas

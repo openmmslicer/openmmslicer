@@ -4,7 +4,7 @@ import numpy as np
 
 from slicer.correlation_metrics import *
 from slicer.fe_estimators import EnsembleMBAR
-from slicer.smc.misc import WalkerMemo
+from slicer.samplers.misc import WalkerMemo
 
 
 def test_effectiveDecorrelationTime():

@@ -26,7 +26,7 @@ import slicer.sampling_metrics as _sammetrics
 _logger = _logging.getLogger(__name__)
 
 
-class GenericSMCSampler:
+class SMCSampler:
     """
     A generic sequential Monte Carlo sampler which can enhance the sampling of certain degrees of freedom.
 
@@ -47,7 +47,7 @@ class GenericSMCSampler:
     npt : bool
         Whether to add a barostat at 1 atm.
     checkpoint : str
-        A path to a pickled checkpoint file to load GenericSMCSampler from. If this is None, GenericSMCSampler is
+        A path to a pickled checkpoint file to load SMCSampler from. If this is None, SMCSampler is
         initialised normally.
     md_config : dict
         Additional parameters passed to generateSystem().
@@ -78,8 +78,6 @@ class GenericSMCSampler:
         The current lambda value.
     total_sampling_steps : int
         A counter keeping track of the number of times the integrator was called.
-    lambda_history : dict
-        A dictionary containing all past lambda values.
     reporters : [slicer.reporters.MultistateDCDReporter, slicer.reporters.MulsistateStateDataReporter]
         The reporter list containing all multistate reporters.
     walkers : [slicer.smc.misc.Walker]
@@ -88,7 +86,7 @@ class GenericSMCSampler:
         The current estimate of the dimensionless free energy difference.
     """
     # TODO: make pickle work
-    _picklable_attrs = ["total_sampling_steps", "_lambda_", "lambda_history", "walkers", "initialised", "reporters"]
+    _picklable_attrs = ["total_sampling_steps", "_lambda_", "walkers", "initialised", "reporters"]
     default_alchemical_functions = {
         'lambda_sterics': lambda x: min(1.25 * x, 1.),
         'lambda_electrostatics': lambda x: max(0., 5. * x - 4.),
@@ -106,7 +104,7 @@ class GenericSMCSampler:
         self.coordinates = coordinates
         self.moves = moves
         self.structure = structure
-        self.system = GenericSMCSampler.generateSystem(self.structure, **md_config)
+        self.system = SMCSampler.generateSystem(self.structure, **md_config)
         self.generateAlchemicalRegion()
         if "alchemical_torsions" not in alch_config.keys():
             alch_config["alchemical_torsions"] = self._alchemical_dihedral_indices
@@ -124,10 +122,9 @@ class GenericSMCSampler:
         self.initialised = False
         self.total_sampling_steps = 0
         self._lambda_ = 0.
-        self.lambda_history = [0.]
         self.reporters = []
         self.walker_memo = _WalkerMemo()
-        self.walkers = []
+        self._walkers = []
 
         if checkpoint is not None:
             _logger.info("Loading checkpoint...")
@@ -197,7 +194,7 @@ class GenericSMCSampler:
         if lambda_ is None:
             lambda_ = self.lambda_
         # TODO: fix rounding
-        return len([x for x in self.lambda_history if round(x, 8) == round(lambda_, 8)]) - 1
+        return _np.sum(_np.isclose(self.walker_memo.timestep_lambdas, lambda_, rtol=1e-8))
 
     @property
     def lambda_(self):
@@ -218,7 +215,6 @@ class GenericSMCSampler:
 
             # update lambdas
             self._lambda_ = float(val)
-            self.lambda_history += [self._lambda_]
             self._update_alchemical_lambdas(self._lambda_)
 
             # update walkers
@@ -404,7 +400,7 @@ class GenericSMCSampler:
         state : openmm.State, slicer.utils.Walker
             Sets the state from either an openmm.State object or a slicer.utils.Walker object.
         context : openmm.Context
-            The context to which the state needs to be applied. Default is GenericSMCSampler.simulation.context.
+            The context to which the state needs to be applied. Default is SMCSampler.simulation.context.
         """
         if context is None:
             context = self.simulation.context
@@ -514,17 +510,17 @@ class GenericSMCSampler:
             # root layer
             if not len(self.walkers):
                 state = self.simulation.context.getState(getPositions=True, getEnergy=True)
-                self.walkers = [_Walker(0, state=state)]
+                self._walkers = [_Walker(0, state=state)]
             # lambda = 0 layer
-            self.walkers = [_Walker(i,
-                                    state=self.walkers[i % len(self.walkers)].state,
-                                    reporter_filename=self.walkers[i % len(self.walkers)].reporter_filename,
-                                    frame=self.walkers[i % len(self.walkers)].frame,
-                                    lambda_=self.lambda_,
-                                    iteration=self.iteration(),
-                                    logW=0)
-                            for i in range(max(n_walkers, len(self.walkers)))]
-        self.initialised = True
+            self._walkers = [_Walker(i,
+                                     state=self.walkers[i % len(self.walkers)].state,
+                                     reporter_filename=self.walkers[i % len(self.walkers)].reporter_filename,
+                                     frame=self.walkers[i % len(self.walkers)].frame,
+                                     lambda_=self.lambda_,
+                                     iteration=self.iteration(),
+                                     logW=0)
+                             for i in range(max(n_walkers, len(self.walkers)))]
+            self.initialised = True
 
     def sample(self,
                default_decorrelation_steps=500,
@@ -727,6 +723,9 @@ class GenericSMCSampler:
                 log_weights = _np.log(weights[resampled_indices]) - _np.log(n_resampled / _np.sum(n_resampled))
                 logWs += log_weights - _logsumexp(log_weights) + _np.log(log_weights.shape)
 
+            if change_walkers:
+                self.walker_memo.removeWalkers(walkers)
+
             new_walkers = [_Walker(i_new,
                                    state=walkers[i_old].state,
                                    transform=walkers[i_old].transform,
@@ -739,7 +738,6 @@ class GenericSMCSampler:
 
             # update the object, if applicable
             if change_walkers:
-                self.walker_memo.removeWalkers(walkers)
                 self.walkers = new_walkers
 
         return new_walkers
@@ -817,7 +815,7 @@ class GenericSMCSampler:
         load_checkpoint : str
             Describes a path to a checkpoint file written with write_checkpoint. In order to use this, the same
             arguments must be passed to this function as when the checkpoint file was written. This option also
-            typically requires that the GenericSMCSampler was instantiated with the same checkpoint file. None
+            typically requires that the SMCSampler was instantiated with the same checkpoint file. None
             means that no checkpoint will be read.
         """
         if _inspect.isclass(sampling_metric):
@@ -920,8 +918,8 @@ class GenericSMCSampler:
             self.writeCheckpoint({"self": self.serialise()}, filename=write_checkpoint, update=False)
 
         # dump info to logger
-        _logger.info("Sampling at lambda = {:.8g} terminated after {} steps per walker".format(self.lambda_history[-2],
-                                                                                               elapsed_steps))
+        _logger.info("Sampling at lambda = {:.8g} terminated after {} steps per walker".format(
+            self.walker_memo.timestep_lambdas[-1], elapsed_steps))
         if self.current_trajectory_filename is not None:
             _logger.info("Trajectory path: \"{}\"".format(self.current_trajectory_filename))
         _logger.info("Current accumulated logZ: {:.8g}".format(self.logZ))
@@ -982,7 +980,7 @@ class GenericSMCSampler:
                 assert equilibration_steps % output_interval == 0, "The equilibration steps must be a multiple of " \
                                                                    "the output interval"
             frame_step = equilibration_steps // output_interval if output_interval else None
-            self.walkers = []
+            self._walkers = []
             for i in range(n_equilibrations):
                 old_state = self.simulation.context.getState(getPositions=True)
                 self.equilibrate(equilibration_steps=equilibration_steps,
@@ -991,10 +989,10 @@ class GenericSMCSampler:
                                  restrain_alchemical_atoms=restrain_alchemical_atoms,
                                  force_constant=force_constant,
                                  output_interval=output_interval)
-                self.walkers += [_Walker(i,
-                                         state=self.simulation.context.getState(getPositions=True, getEnergy=True),
-                                         reporter_filename=self.current_trajectory_filename,
-                                         frame=(i + 1) * frame_step - 1) if frame_step is not None else None]
+                self._walkers += [_Walker(i,
+                                          state=self.simulation.context.getState(getPositions=True, getEnergy=True),
+                                          reporter_filename=self.current_trajectory_filename,
+                                          frame=(i + 1) * frame_step - 1) if frame_step is not None else None]
                 self.setState(old_state, self.simulation.context)
 
         initial_sampling_steps = self.total_sampling_steps
