@@ -219,8 +219,8 @@ class TranslationMove(Move):
                     break
 
         if type(translatable_molecule) is not int:
-            raise TypeError("Invalid input: {}. Need either a valid residue name or residue number.".format(
-                translatable_molecule))
+            raise TypeError(f"Invalid input: {translatable_molecule}. Need either a valid residue name or residue "
+                            f"number.")
 
         self.sampling = sampling
         self.movable_atoms = [a.idx for a in structure.residues[translatable_molecule]]
@@ -381,8 +381,7 @@ class RotationMove(Move):
                     break
 
         if type(rotatable_molecule) is not int:
-            raise TypeError("Invalid input: {}. Need either a valid residue name or residue number.".format(
-                rotatable_molecule))
+            raise TypeError(f"Invalid input: {rotatable_molecule}. Need either a valid residue name or residue number.")
 
         self.sampling = sampling
         self.movable_atoms = [a.idx for a in structure.residues[rotatable_molecule]]
