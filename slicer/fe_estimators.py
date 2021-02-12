@@ -336,9 +336,6 @@ class MBARResult:
             fes = _np.zeros(lambdas.size)
         else:
             fes = _np.zeros((len(self.log_weights), lambdas.size))
-        #fes = _np.asarray([self._free_energy_memo[..., _np.where(self._lambda_memo == x)[0][0]] for x in lambdas]).T
-        #if self._single_model:
-        #    fes = fes[0]
         for i, lambda_ in _np.ndenumerate(lambdas):
             fes[..., i] = self._free_energy_memo[..., _np.where(self._lambda_memo == lambda_)[0]]
         return fes
