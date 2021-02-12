@@ -367,7 +367,7 @@ class MBARResult:
 
 
 class AbstractFEEstimator(_abc.ABC):
-    def __init__(self, walker_memo, update_func=lambda self: 1):
+    def __init__(self, walker_memo, update_func=lambda self: 1 + 0.01 * self.walker_memo.timesteps):
         self.walker_memo = walker_memo
         self.update_func = update_func
 
