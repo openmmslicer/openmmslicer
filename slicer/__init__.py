@@ -1,5 +1,4 @@
 # TODO: update docstrings
-# TODO: use fstrings everywhere
 from . import alchemy
 from . import correlation_metrics
 from . import fe_estimators

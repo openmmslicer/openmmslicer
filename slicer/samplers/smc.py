@@ -135,7 +135,7 @@ class SMCSampler:
                     if attr == "_lambda_":
                         self._update_alchemical_lambdas(self.lambda_)
                 except AttributeError:
-                    _warnings.warn("There was missing or incompatible data from the checkpoint: {}".format(attr))
+                    _warnings.warn(f"There was missing or incompatible data from the checkpoint: {attr}")
 
     @property
     def trajectory_reporter(self):
@@ -420,7 +420,7 @@ class SMCSampler:
             if state.transform is not None:
                 self.moves.applyMove(context, state.transform)
         else:
-            raise TypeError("Unrecognised parameter type {}".format(type(state)))
+            raise TypeError(f"Unrecognised parameter type {type(state)}")
 
     def _update_alchemical_lambdas(self, lambda_):
         valid_parameters = [x for x in self.simulation.context.getParameters()]
@@ -486,7 +486,7 @@ class SMCSampler:
         for i in atoms:
             force.addParticle(i, self.structure.positions[i].value_in_unit(_unit.nanometers))
         if counter:
-            _logger.info("Adding {} equilibration restraints...".format(counter))
+            _logger.info(f"Adding {counter} equilibration restraints...")
             force_idx = self.alch_system.addForce(force)
 
         # run the equilibration
@@ -497,7 +497,7 @@ class SMCSampler:
 
         # remove the restraints, if applicable
         if counter:
-            _logger.info("Removing {} equilibration restraints...".format(counter))
+            _logger.info(f"Removing {counter} equilibration restraints...")
             self.alch_system.removeForce(force_idx)
 
         # reset the reporter, if applicable
@@ -606,7 +606,7 @@ class SMCSampler:
                            n_transforms_per_walker=100,
                            generate_transforms=None):
         if generate_transforms or (generate_transforms is None and self.lambda_ == 0):
-            _logger.info("Generating {} total transforms...".format(len(self.walkers) * n_transforms_per_walker))
+            _logger.info(f"Generating {len(self.walkers) * n_transforms_per_walker} total transforms...")
             new_walkers = []
 
             i = 0
@@ -651,7 +651,7 @@ class SMCSampler:
             weights /= _np.sum(weights)
             if resampling_metric is not None:
                 val = resampling_metric(weights)
-                _logger.debug("Resampling metric {:.8g} at next lambda {:.8g}".format(val, new_lambda))
+                _logger.debug(f"Resampling metric {val} at next lambda {new_lambda}")
                 return val
 
         # change direction, if needed
@@ -684,7 +684,7 @@ class SMCSampler:
                                       if sgn * self.lambda_ < sgn * x < sgn * next_lambda_]
             if len(fixed_lambdas_filtered):
                 next_lambda_ = fixed_lambdas_filtered[-1 * sgn]
-            _logger.debug("Tentative next lambda: {:.8g}".format(next_lambda_))
+            _logger.debug(f"Tentative next lambda: {next_lambda_}")
         else:
             # else use default_dlambda
             next_lambda_ = max(min(1., self.lambda_ + default_dlambda), 0.)
@@ -880,11 +880,10 @@ class SMCSampler:
                 if sampling_metric.requireNextLambda:
                     next_lambda = self.reweight(**reweight_kwargs, change_lambda=False)
                     sampling_metric.evaluateAfter(next_lambda)
-                    _logger.debug("Sampling metric {:.8g} at next lambda {:.8g}".format(sampling_metric.metric,
-                                                                                        next_lambda))
+                    _logger.debug(f"Sampling metric {sampling_metric.metric} at next lambda {next_lambda}")
                 else:
                     sampling_metric.evaluateAfter()
-                    _logger.debug("Sampling metric {:.8g}".format(sampling_metric.metric))
+                    _logger.debug(f"Sampling metric {sampling_metric.metric}")
                 if not sampling_metric.terminateSampling and elapsed_steps < maximum_decorrelation_steps:
                     continue
                 sampling_metric.reset()
@@ -918,12 +917,12 @@ class SMCSampler:
             self.writeCheckpoint({"self": self.serialise()}, filename=write_checkpoint, update=False)
 
         # dump info to logger
-        _logger.info("Sampling at lambda = {:.8g} terminated after {} steps per walker".format(
-            self.walker_memo.timestep_lambdas[-1], elapsed_steps))
+        _logger.info(f"Sampling at lambda = {self.walker_memo.timestep_lambdas[-1]} terminated after {elapsed_steps} "
+                     f"steps per walker")
         if self.current_trajectory_filename is not None:
-            _logger.info("Trajectory path: \"{}\"".format(self.current_trajectory_filename))
-        _logger.info("Current accumulated logZ: {:.8g}".format(self.logZ))
-        _logger.info("Next lambda: {:.8g}".format(self.lambda_))
+            _logger.info(f"Trajectory path: \"{self.current_trajectory_filename}\"")
+        _logger.info(f"Current accumulated logZ: {self.logZ}")
+        _logger.info(f"Next lambda: {self.lambda_}")
 
     def run(self,
             *args,
@@ -1002,7 +1001,7 @@ class SMCSampler:
             runOnce()
         sampling_step_difference = self.total_sampling_steps - initial_sampling_steps
         total_sampling_time = sampling_step_difference * self.integrator.getStepSize().in_units_of(_unit.nanosecond)
-        _logger.info("The SMC run cycle finished in {}".format(total_sampling_time))
+        _logger.info(f"The SMC run cycle finished in {total_sampling_time}")
 
     def generateAlchemicalRegion(self):
         """Makes sure that all rotated dihedrals are also made alchemical."""
@@ -1271,7 +1270,7 @@ class SMCSampler:
         system : openmm.System
             The OpenMM System with the MonteCarloBarostat attached.
         """
-        _logger.info('Adding MonteCarloBarostat with {}. MD simulation will be {} NPT.'.format(pressure, temperature))
+        _logger.info(f"Adding MonteCarloBarostat with {pressure}. MD simulation will be {temperature} NPT.")
         # Add Force Barostat to the system
         system.addForce(_openmm.MonteCarloBarostat(pressure, temperature, frequency))
         return system
