@@ -37,13 +37,21 @@ class FASTSampler(_STSampler):
             assert func(0) == 0 and func(1) == 1, "All alchemical functions must go from 0 to 1"
 
     @property
-    def interpolatable_lambdas(self):
+    def interpolatable_protocol(self):
         lambdas = set()
         for key, value in self.alchemical_functions.items():
             if value.full_interpolation:
                 lambdas |= {x for x in self.protocol.value if value.start <= x <= value.end}
             lambdas |= set(value.boundaries)
-        return sorted(lambdas)
+        return _np.asarray(sorted(lambdas))
+
+    @_STSampler.walkers.setter
+    def walkers(self, val):
+        if self.protocol is None:
+            self.walker_memo.updateWalkers(val)
+        else:
+            self.walker_memo.updateWalkersAndEnergies(val, self, self.interpolatable_protocol)
+        self._walkers = val
 
     def _initialise_protocol(self):
         idx = _np.where(self.walker_memo.timestep_lambdas == 1)[0][0]
