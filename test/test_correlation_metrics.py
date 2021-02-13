@@ -27,3 +27,34 @@ def test_effectiveDecorrelationTime():
     fe_estimator = EnsembleMBAR(walker_memo)
     fe_estimator.interval = EffectiveDecorrelationTime(fe_estimator, protocol=np.asarray([0, 0.5, 1]))
     assert np.isclose(fe_estimator._interval(), 4 / 6.220159220666085)
+
+    walker_memo.timestep_lambdas = np.asarray([0., 0.5, 1., 0.8, 0.9, 0.8, 0.9])
+    walker_memo.timesteps = len(walker_memo.timestep_lambdas)
+    decorr = EffectiveDecorrelationTime(fe_estimator, protocol=np.asarray([0, 0.82, 0.88, 1]))
+    assert decorr.min_lambda == 0.82
+    assert decorr.max_lambda == 0.88
+
+    walker_memo.timestep_lambdas = np.asarray([0., 0.8])
+    walker_memo.timesteps = len(walker_memo.timestep_lambdas)
+    assert decorr.min_lambda is None
+    assert decorr.max_lambda is None
+
+    walker_memo.timestep_lambdas = np.asarray([0., 0.8, 1.])
+    walker_memo.timesteps = len(walker_memo.timestep_lambdas)
+    assert decorr.min_lambda is None
+    assert decorr.max_lambda is None
+
+    walker_memo.timestep_lambdas = np.asarray([0., 0.8, 1., 0.9])
+    walker_memo.timesteps = len(walker_memo.timestep_lambdas)
+    assert decorr.min_lambda is None
+    assert decorr.max_lambda is None
+
+    walker_memo.timestep_lambdas = np.asarray([0., 0.8, 1., 0.8])
+    walker_memo.timesteps = len(walker_memo.timestep_lambdas)
+    assert decorr.min_lambda == 0.82
+    assert decorr.max_lambda is None
+
+    walker_memo.timestep_lambdas = np.asarray([0., 0.8, 1., 0.7, 0.8])
+    walker_memo.timesteps = len(walker_memo.timestep_lambdas)
+    assert decorr.min_lambda == 0.82
+    assert decorr.max_lambda is None
