@@ -3,6 +3,7 @@ import cachetools as _cachetools
 import collections as _collections
 from itertools import groupby as _groupby
 import math as _math
+import threading as _threading
 
 import numpy as _np
 import pandas as _pd
@@ -89,10 +90,25 @@ class Walker:
 
 class WalkerMemo:
     def __init__(self):
+        self._lock = _threading.RLock()
         self._walker_memo = []
         self._protocol_memo = []
         self._energy_memo = []
         self._energy_matrix_memo = _cachetools.LRUCache(maxsize=1)
+
+    def __getattribute__(self, item):
+        if item != "_lock":
+            with self._lock:
+                return super().__getattribute__(item)
+        else:
+            return super().__getattribute__(item)
+
+    def __setattr__(self, key, value):
+        if key != "_lock" and hasattr(self, "_lock"):
+            with self._lock:
+                super().__setattr__(key, value)
+        else:
+            super().__setattr__(key, value)
 
     @_cached_property
     def interpolator(self):
@@ -109,6 +125,10 @@ class WalkerMemo:
     @_cached_property
     def lambda_counts(self):
         return _np.unique(self.lambdas, return_counts=True)[-1]
+
+    @property
+    def lock(self):
+        return self._lock
 
     @_cached_property
     def mbar_indices(self):
@@ -186,6 +206,7 @@ class WalkerMemo:
         walkers = self.relevant_walkers[len(self._protocol_memo):]
         self._protocol_memo += [_np.sort(lambdas)] * len(walkers)
         self._energy_memo += ensemble.calculateStateEnergies(lambdas, walkers=walkers).T.tolist()
+        self.resetMemos()
 
     def updateWalkersAndEnergies(self, walkers, ensemble, lambdas):
         self.updateWalkers(walkers)

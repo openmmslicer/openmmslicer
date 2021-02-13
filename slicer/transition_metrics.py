@@ -81,9 +81,10 @@ class ExpectedRoundTripTime:
         lambdas = self._cast(lambdas)
 
         # obtain the relevant data from the estimator
-        energy = self.fe_estimator.walker_memo.energyMatrix(lambdas)
-        free_energy = self.fe_estimator.computeFreeEnergies(lambdas, energy=energy)
-        model, custom_indices = self.fe_estimator.getModel()
+        with self.fe_estimator.walker_memo.lock:
+            energy = self.fe_estimator.walker_memo.energyMatrix(lambdas)
+            free_energy = self.fe_estimator.computeFreeEnergies(lambdas, energy=energy)
+            model, custom_indices = self.fe_estimator.getModel()
         log_weights = model.log_weights
 
         # call the vectorised expected transition matrix function

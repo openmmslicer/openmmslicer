@@ -1,6 +1,7 @@
 import abc as _abc
 from collections import defaultdict as _defaultdict
 import logging as _logging
+import threading as _threading
 import warnings as _warnings
 
 from cached_property import cached_property as _cached_property
@@ -386,9 +387,10 @@ class AbstractFEEstimator(_abc.ABC):
 
 
 class MBAR(AbstractFEEstimator):
-    def __init__(self, *args, parallel=False, **kwargs):
+    def __init__(self, *args, parallel=False, background=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.parallel = parallel
+        self.background = background
 
     @property
     def walker_memo(self):
@@ -401,6 +403,7 @@ class MBAR(AbstractFEEstimator):
 
     def reset(self):
         self._model_memo = _defaultdict(lambda: (0, None, _np.asarray([])))
+        self._thread_memo = _defaultdict(lambda: None)
 
     def _convert_indices(self, custom_indices=None, min_lambda=0., max_lambda=1., strict_lambdas=False):
         # generate walker indices from time indices, if applicable
@@ -422,42 +425,51 @@ class MBAR(AbstractFEEstimator):
         return custom_indices
 
     def fit(self, custom_indices=None, min_lambda=0., max_lambda=1., strict_lambdas=False, old_model=None, **kwargs):
-        # filter and convert the custom_indices
-        custom_indices = self._convert_indices(custom_indices=custom_indices, min_lambda=min_lambda,
-                                               max_lambda=max_lambda, strict_lambdas=strict_lambdas)
+        with self.walker_memo.lock:
+            next_calculation = self.walker_memo.timesteps + self.update_func(self)
 
-        if not custom_indices.size:
-            model = None
-        else:
+            # filter and convert the custom_indices
+            custom_indices = self._convert_indices(custom_indices=custom_indices, min_lambda=min_lambda,
+                                                   max_lambda=max_lambda, strict_lambdas=strict_lambdas)
+
+            if not custom_indices.size:
+                self._model_memo[(min_lambda, max_lambda)] = (next_calculation, None, custom_indices)
+                return None, custom_indices
+
             # create the MBAR arguments
-            if old_model is not None:
-                interp = _interp1d(old_model._lambda_memo, old_model._free_energy_memo)
-                initial_free_energy = interp(self.walker_memo.unique_lambdas)
-                kwargs["initial_free_energy"] = initial_free_energy - initial_free_energy[0]
-            valid_lambdas, valid_num_conf = _np.unique(self.walker_memo.lambdas[custom_indices], return_counts=True)
-            num_conf = _np.zeros(len(self.walker_memo.unique_lambdas))
-            num_conf[_np.isin(self.walker_memo.unique_lambdas, valid_lambdas)] = valid_num_conf
-            energy = self.walker_memo.energyMatrix(lambdas=self.walker_memo.unique_lambdas)[:, custom_indices]
+            unique_lambdas = self.walker_memo.unique_lambdas
+            lambdas = self.walker_memo.lambdas
+            energy = self.walker_memo.energyMatrix(lambdas=unique_lambdas)[:, custom_indices]
+        if old_model is not None:
+            interp = _interp1d(old_model._lambda_memo, old_model._free_energy_memo)
+            initial_free_energy = interp(unique_lambdas)
+            kwargs["initial_free_energy"] = initial_free_energy - initial_free_energy[0]
+        valid_lambdas, valid_num_conf = _np.unique(lambdas[custom_indices], return_counts=True)
+        num_conf = _np.zeros(len(unique_lambdas))
+        num_conf[_np.isin(unique_lambdas, valid_lambdas)] = valid_num_conf
 
-            # run the MBAR model
-            kwargs["parallel"] = self.parallel
-            model = MBARResult(self.walker_memo.unique_lambdas, energy, num_conf, **kwargs)
-
-        # update the memo
-        next_calculation = self.walker_memo.timesteps + self.update_func(self)
-        self._model_memo[(min_lambda, max_lambda)] = (next_calculation, model, custom_indices)
+        # run the MBAR model
+        kwargs["parallel"] = self.parallel
+        model = MBARResult(unique_lambdas, energy, num_conf, **kwargs)
+        with self.walker_memo.lock:
+            self._model_memo[(min_lambda, max_lambda)] = (next_calculation, model, custom_indices)
 
         return model, custom_indices
 
     def getModel(self, min_lambda=0., max_lambda=1., recalculate=False, custom_indices=None, **kwargs):
         next_calculation, model, old_custom_indices = self._model_memo[(min_lambda, max_lambda)]
         if self.walker_memo.timesteps >= next_calculation or recalculate:
-            kwargs["old_model"] = model
-            model, new_custom_indices = self.fit(min_lambda=min_lambda, max_lambda=max_lambda,
-                                                 custom_indices=custom_indices, **kwargs)
-            return model, new_custom_indices
-        else:
-            return model, old_custom_indices
+            kwargs.update(dict(old_model=model, min_lambda=min_lambda, max_lambda=max_lambda,
+                               custom_indices=custom_indices))
+            if self.background and model is not None:
+                thread = self._thread_memo[(min_lambda, max_lambda)]
+                if thread is None or not thread.is_alive():
+                    thread = _threading.Thread(target=self.fit, name="FEEstimator", kwargs=kwargs)
+                    thread.start()
+                    self._thread_memo[(min_lambda, max_lambda)] = thread
+            else:
+                return self.fit(**kwargs)
+        return model, old_custom_indices
 
     def __call__(self, lambda0, lambda1, **kwargs):
         fes = self.computeFreeEnergies([lambda0, lambda1], **kwargs)
@@ -517,6 +529,7 @@ class EnsembleMBAR(MBAR):
 
     def reset(self):
         self._model_memo = _defaultdict(lambda: (0, None, _np.asarray([[]])))
+        self._thread_memo = _defaultdict(lambda: None)
 
     @property
     def effective_sample_size(self):
@@ -577,35 +590,39 @@ class EnsembleMBAR(MBAR):
         return arr_new
 
     def fit(self, custom_indices=None, min_lambda=0., max_lambda=1., strict_lambdas=False, old_model=None, **kwargs):
-        # filter and convert the custom_indices
-        custom_indices = self._convert_indices(custom_indices=custom_indices, min_lambda=min_lambda,
-                                               max_lambda=max_lambda, strict_lambdas=strict_lambdas)
+        with self.walker_memo.lock:
+            next_calculation = self.walker_memo.timesteps + self.update_func(self)
 
-        if not len(custom_indices):
-            model = None
-        else:
+            # filter and convert the custom_indices
+            custom_indices = self._convert_indices(custom_indices=custom_indices, min_lambda=min_lambda,
+                                                   max_lambda=max_lambda, strict_lambdas=strict_lambdas)
+
+            if not len(custom_indices):
+                self._model_memo[(min_lambda, max_lambda)] = (next_calculation, None, custom_indices)
+                return None, custom_indices
+
             # create the MBAR arguments
-            if old_model is not None:
-                interp = _interp1d(old_model._lambda_memo, old_model._free_energy_memo[0])
-                initial_free_energy = interp(self.walker_memo.unique_lambdas)
-                kwargs["initial_free_energy"] = initial_free_energy - initial_free_energy[0]
+            unique_lambdas = self.walker_memo.unique_lambdas
+            lambdas = self.walker_memo.lambdas
+            energy = self.walker_memo.energyMatrix(lambdas=unique_lambdas)
+        if old_model is not None:
+            interp = _interp1d(old_model._lambda_memo, old_model._free_energy_memo[0])
+            initial_free_energy = interp(unique_lambdas)
+            kwargs["initial_free_energy"] = initial_free_energy - initial_free_energy[0]
 
-            num_conf_all = _np.empty((len(custom_indices), len(self.walker_memo.unique_lambdas)))
-            for i, batch in enumerate(custom_indices):
-                valid_lambdas, valid_num_conf = _np.unique(self.walker_memo.lambdas[batch], return_counts=True)
-                num_conf = _np.zeros(len(self.walker_memo.unique_lambdas))
-                num_conf[_np.isin(self.walker_memo.unique_lambdas, valid_lambdas)] = valid_num_conf
-                num_conf_all[i] = num_conf
-            energy = self.walker_memo.energyMatrix(lambdas=self.walker_memo.unique_lambdas)
-            energy_all = self._partition_from_indices(energy, custom_indices)
+        num_conf_all = _np.empty((len(custom_indices), len(unique_lambdas)))
+        for i, batch in enumerate(custom_indices):
+            valid_lambdas, valid_num_conf = _np.unique(lambdas[batch], return_counts=True)
+            num_conf = _np.zeros(len(unique_lambdas))
+            num_conf[_np.isin(unique_lambdas, valid_lambdas)] = valid_num_conf
+            num_conf_all[i] = num_conf
+        energy_all = self._partition_from_indices(energy, custom_indices)
 
-            # run the MBAR model
-            kwargs["parallel"] = self.parallel
-            model = MBARResult(self.walker_memo.unique_lambdas, energy_all, num_conf_all, **kwargs)
-
-        # update the memo
-        next_calculation = self.walker_memo.timesteps + self.update_func(self)
-        self._model_memo[(min_lambda, max_lambda)] = (next_calculation, model, custom_indices)
+        # run the MBAR model
+        kwargs["parallel"] = self.parallel
+        model = MBARResult(unique_lambdas, energy_all, num_conf_all, **kwargs)
+        with self.walker_memo.lock:
+            self._model_memo[(min_lambda, max_lambda)] = (next_calculation, model, custom_indices)
 
         return model, custom_indices
 
@@ -620,11 +637,17 @@ class EnsembleMBAR(MBAR):
         next_calculation, model, old_custom_indices = self._model_memo[(min_lambda, max_lambda)]
         if self.walker_memo.timesteps >= next_calculation or recalculate:
             custom_indices = self._generate_custom_indices()
-            kwargs.update(dict(old_model=model, custom_indices=custom_indices))
-            model, new_custom_indices = self.fit(min_lambda=min_lambda, max_lambda=max_lambda, **kwargs)
-            return model, new_custom_indices
-        else:
-            return model, old_custom_indices
+            kwargs.update(dict(old_model=model, min_lambda=min_lambda, max_lambda=max_lambda,
+                               custom_indices=custom_indices))
+            if self.background and model is not None:
+                thread = self._thread_memo[(min_lambda, max_lambda)]
+                if thread is None or not thread.is_alive():
+                    thread = _threading.Thread(target=self.fit, name="FEEstimator", kwargs=kwargs)
+                    thread.start()
+                    self._thread_memo[(min_lambda, max_lambda)] = thread
+            else:
+                return self.fit(**kwargs)
+        return model, old_custom_indices
 
     def computeFreeEnergies(self, lambdas, energy=None, **kwargs):
         model, custom_indices = self.getModel(**kwargs)
