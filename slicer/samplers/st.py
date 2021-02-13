@@ -23,7 +23,7 @@ class STSampler(_SMCSampler):
                                                        "sampling_history", "fe_estimator"]
 
     def __init__(self, *args, fe_estimator=_fe_estimators.EnsembleBAR, n_bootstraps=None, n_decorr=None,
-                 fe_update_func=lambda self: 1 + 0.01 * self.effective_sample_size, parallel=False,
+                 fe_update_func=lambda self: 1 + 0.01 * self.effective_sample_size, fe_parallel=False,
                  significant_figures=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._target_lambda = 1
@@ -33,7 +33,7 @@ class STSampler(_SMCSampler):
         self.fe_estimator = None
         self.protocol = None
         self._post_adaptive_kwargs = dict(fe_estimator=fe_estimator, n_bootstraps=n_bootstraps, n_decorr=n_decorr,
-                                          fe_update_func=fe_update_func, parallel=parallel,
+                                          fe_update_func=fe_update_func, fe_parallel=fe_parallel,
                                           significant_figures=significant_figures)
 
     @property
@@ -132,10 +132,10 @@ class STSampler(_SMCSampler):
                 kwargs = dict(n_bootstraps=self._post_adaptive_kwargs["n_bootstraps"],
                               n_decorr=self._post_adaptive_kwargs["n_decorr"],
                               update_func=self._post_adaptive_kwargs["fe_update_func"],
-                              parallel=self._post_adaptive_kwargs["parallel"])
+                              parallel=self._post_adaptive_kwargs["fe_parallel"])
             else:
                 kwargs = dict(update_func=self._post_adaptive_kwargs["fe_update_func"],
-                              parallel=self._post_adaptive_kwargs["parallel"])
+                              parallel=self._post_adaptive_kwargs["fe_parallel"])
             fe_estimator = fe_estimator(self.walker_memo, **kwargs)
             if self._post_adaptive_kwargs["n_decorr"]:
                 fe_estimator.interval = _EffectiveDecorrelationTime(fe_estimator=fe_estimator,
