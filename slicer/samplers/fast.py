@@ -4,6 +4,7 @@ import numpy as _np
 
 from .st import STSampler as _STSampler
 from .misc import LinearAlchemicalFunction as _LinearAlchemicalFunction
+import slicer.fe_estimators as _fe_estimators
 from slicer.protocol import OptimisableProtocol as _OptimisableProtocol
 
 _logger = _logging.getLogger(__name__)
@@ -17,9 +18,9 @@ class FASTSampler(_STSampler):
         'lambda_torsions': _LinearAlchemicalFunction(0, 0.5),
     }
 
-    def __init__(self, *args, significant_figures=2,
+    def __init__(self, *args, fe_estimator=_fe_estimators.MBAR, significant_figures=2,
                  prot_update_func=lambda self: 100 + 0.1 * self.ensemble.fe_estimator.effective_sample_size, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, fe_estimator=fe_estimator, **kwargs)
         self._post_adaptive_kwargs.update(dict(significant_figures=significant_figures,
                                                prot_update_func=prot_update_func))
 
