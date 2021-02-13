@@ -34,21 +34,25 @@ def _interp_vectorised(x, xp, yp, res):
 
 class BatchLinearInterp:
     def __init__(self, x, y, sort=True):
-        lengths = _np.asarray([len(i) for i in x])
-        unique_lengths = _np.unique(lengths)
-        self.dimensional_indices = [(i, _np.where(lengths == i)[0]) for i in unique_lengths]
-        self.n_samples = len(x)
-        self.xs = [_np.asarray([x[i] for i in indices]) for _, indices in self.dimensional_indices]
-        self.ys = [_np.asarray([y[i] for i in indices]) for _, indices in self.dimensional_indices]
+        min_len = min(len(x), len(y))
+        x, y = x[:min_len], y[:min_len]
+        lengths_x, lengths_y = _np.asarray([len(i) for i in x]), _np.asarray([len(i) for i in y])
+        if not _np.array_equal(lengths_x, lengths_y):
+            raise ValueError("Need x and y to be the same shape")
+        unique_lengths = _np.unique(lengths_x)
+        self._dimensional_indices = [(i, _np.where(lengths_x == i)[0]) for i in unique_lengths]
+        self._n_samples = min_len
+        self._xs = [_np.asarray([x[i] for i in indices]) for _, indices in self._dimensional_indices]
+        self._ys = [_np.asarray([y[i] for i in indices]) for _, indices in self._dimensional_indices]
         if sort:
-            for x, y in zip(self.xs, self.ys):
+            for x, y in zip(self._xs, self._ys):
                 argsort = _np.argsort(x, axis=-1)
                 x[:] = _np.take_along_axis(x, argsort, axis=-1)
                 y[:] = _np.take_along_axis(y, argsort, axis=-1)
 
     def __call__(self, x_interp):
         x_interp = _np.asarray(x_interp)
-        res = _np.empty((len(x_interp), self.n_samples))
-        for (_, indices), x, y in zip(self.dimensional_indices, self.xs, self.ys):
+        res = _np.empty((len(x_interp), self._n_samples))
+        for (_, indices), x, y in zip(self._dimensional_indices, self._xs, self._ys):
             res[:, indices] = _interp_vectorised(x_interp, x, y)
         return res
