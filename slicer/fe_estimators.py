@@ -536,10 +536,11 @@ class EnsembleMBAR(MBAR):
 
     def _generate_custom_indices(self):
         # decorrelate, if applicable
-        if self.interval != 1 and self.n_decorr is not None:
-            n_decorr = max(1, min(self.n_decorr, self.interval))
-            offsets = _np.random.choice(_np.arange(self.interval), size=n_decorr, replace=False)
-            custom_indices = [_np.arange(self.walker_memo.timesteps - 1 - x, -1, -self.interval)[::-1] for x in offsets]
+        interval = self.interval
+        if interval != 1 and self.n_decorr is not None:
+            n_decorr = max(1, min(self.n_decorr, interval))
+            offsets = _np.random.choice(_np.arange(interval), size=n_decorr, replace=False)
+            custom_indices = [_np.arange(self.walker_memo.timesteps - 1 - x, -1, -interval)[::-1] for x in offsets]
             custom_indices = [self.walker_memo.time_to_walker_indices(x) for x in custom_indices]
         else:
             custom_indices = [_np.arange(len(self.walker_memo.relevant_walkers))]
