@@ -724,6 +724,7 @@ class SMCSampler:
                 logWs += log_weights - _logsumexp(log_weights) + _np.log(log_weights.shape)
 
             if change_walkers:
+                self.walker_memo.lock.acquire()
                 self.walker_memo.removeWalkers(walkers)
 
             new_walkers = [_Walker(i_new,
@@ -739,6 +740,7 @@ class SMCSampler:
             # update the object, if applicable
             if change_walkers:
                 self.walkers = new_walkers
+                self.walker_memo.lock.release()
 
         return new_walkers
 

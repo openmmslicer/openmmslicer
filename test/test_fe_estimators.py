@@ -1,10 +1,12 @@
 from mock import Mock
 import numpy as np
+from threading import RLock
 
 from slicer.samplers.misc import WalkerMemo
 from slicer.fe_estimators import MBARResult, MBAR, BAR, EnsembleMBAR, EnsembleBAR
 
 walker_memo = Mock()
+walker_memo.lock = RLock()
 walker_memo.lambdas = np.asarray([0., 1., 0., 0., 1.])
 walker_memo.unique_lambdas = np.asarray([0., 1])
 walker_memo.mbar_indices = WalkerMemo.mbar_indices.__get__(walker_memo, WalkerMemo)

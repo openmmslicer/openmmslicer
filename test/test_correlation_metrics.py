@@ -1,4 +1,5 @@
 from mock import Mock
+from threading import RLock
 
 import numpy as np
 
@@ -9,6 +10,7 @@ from slicer.samplers.misc import WalkerMemo
 
 def test_effectiveDecorrelationTime():
     walker_memo = Mock()
+    walker_memo.lock = RLock()
     walker_memo.lambdas = np.asarray([0., 1., 0.5, 0., 1.])
     walker_memo.unique_lambdas = np.asarray([0., 0.5, 1])
     walker_memo.mbar_indices = WalkerMemo.mbar_indices.__get__(walker_memo, WalkerMemo)

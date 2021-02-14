@@ -24,7 +24,7 @@ class STSampler(_SMCSampler):
 
     def __init__(self, *args, fe_estimator=_fe_estimators.EnsembleBAR, n_bootstraps=None, n_decorr=None,
                  fe_update_func=lambda self: 1 + 0.01 * self.effective_sample_size, fe_parallel=False,
-                 significant_figures=None, **kwargs):
+                 fe_background=False, significant_figures=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._target_lambda = 1
         self.adaptive_mode = True
@@ -34,7 +34,7 @@ class STSampler(_SMCSampler):
         self.protocol = None
         self._post_adaptive_kwargs = dict(fe_estimator=fe_estimator, n_bootstraps=n_bootstraps, n_decorr=n_decorr,
                                           fe_update_func=fe_update_func, fe_parallel=fe_parallel,
-                                          significant_figures=significant_figures)
+                                          fe_background=fe_background, significant_figures=significant_figures)
 
     @property
     def adaptive_mode(self):
@@ -132,10 +132,12 @@ class STSampler(_SMCSampler):
                 kwargs = dict(n_bootstraps=self._post_adaptive_kwargs["n_bootstraps"],
                               n_decorr=self._post_adaptive_kwargs["n_decorr"],
                               update_func=self._post_adaptive_kwargs["fe_update_func"],
-                              parallel=self._post_adaptive_kwargs["fe_parallel"])
+                              parallel=self._post_adaptive_kwargs["fe_parallel"],
+                              background=self._post_adaptive_kwargs["fe_background"])
             else:
                 kwargs = dict(update_func=self._post_adaptive_kwargs["fe_update_func"],
-                              parallel=self._post_adaptive_kwargs["fe_parallel"])
+                              parallel=self._post_adaptive_kwargs["fe_parallel"],
+                              background=self._post_adaptive_kwargs["fe_background"])
             fe_estimator = fe_estimator(self.walker_memo, **kwargs)
             if self._post_adaptive_kwargs["n_decorr"]:
                 fe_estimator.interval = _EffectiveDecorrelationTime(fe_estimator=fe_estimator,
@@ -165,31 +167,32 @@ class STSampler(_SMCSampler):
         if self.adaptive_mode:
             return super().reweight(*args, **kwargs)
 
-        # get acceptance criterion
-        fe_fwd = self.fe_estimator(self.lambda_, self.next_lambda)
-        deltaEs_fwd = self.calculateDeltaEs(self.next_lambda, self.lambda_)
-        samples_fwd = _np.sum(_np.meshgrid(fe_fwd, -deltaEs_fwd), axis=0)
-        acc_fwd = _np.average(_np.exp(_np.minimum(samples_fwd, 0.)))
-        _logger.debug(f"Forward probability to lambda = {self.next_lambda} is {acc_fwd} with dimensionless "
-                      f"free energy = {fe_fwd}")
-        
-        # accept or reject move and/or swap direction
-        randnum = _random.random()
-        if acc_fwd != 1. and randnum >= acc_fwd:
-            if not _math.isclose(self.next_lambda, self.previous_lambda):
-                fe_bwd = self.fe_estimator(self.lambda_, self.previous_lambda)
-                deltaEs_bwd = self.calculateDeltaEs(self.previous_lambda, self.lambda_)
-                samples_bwd = _np.sum(_np.meshgrid(fe_bwd, -deltaEs_bwd), axis=0)
-                acc_bwd = max(0., _np.average(_np.exp(_np.minimum(samples_bwd, 0.))) - acc_fwd)
-                _logger.debug(f"Backward probability to lambda = {self.previous_lambda} is {acc_bwd} with "
-                              f"dimensionless free energy = {fe_bwd}")
+        with self.fe_estimator.walker_memo.lock:
+            # get acceptance criterion
+            fe_fwd = self.fe_estimator(self.lambda_, self.next_lambda)
+            deltaEs_fwd = self.calculateDeltaEs(self.next_lambda, self.lambda_)
+            samples_fwd = _np.sum(_np.meshgrid(fe_fwd, -deltaEs_fwd), axis=0)
+            acc_fwd = _np.average(_np.exp(_np.minimum(samples_fwd, 0.)))
+            _logger.debug(f"Forward probability to lambda = {self.next_lambda} is {acc_fwd} with dimensionless "
+                          f"free energy = {fe_fwd}")
 
-                if acc_bwd != 0. and randnum - acc_fwd < acc_bwd:
-                    self.target_lambda = int(not self.target_lambda)
-            # trigger walker update
-            self.lambda_ = self.lambda_
-        else:
-            self.lambda_ = self.next_lambda
+            # accept or reject move and/or swap direction
+            randnum = _random.random()
+            if acc_fwd != 1. and randnum >= acc_fwd:
+                if not _math.isclose(self.next_lambda, self.previous_lambda):
+                    fe_bwd = self.fe_estimator(self.lambda_, self.previous_lambda)
+                    deltaEs_bwd = self.calculateDeltaEs(self.previous_lambda, self.lambda_)
+                    samples_bwd = _np.sum(_np.meshgrid(fe_bwd, -deltaEs_bwd), axis=0)
+                    acc_bwd = max(0., _np.average(_np.exp(_np.minimum(samples_bwd, 0.))) - acc_fwd)
+                    _logger.debug(f"Backward probability to lambda = {self.previous_lambda} is {acc_bwd} with "
+                                  f"dimensionless free energy = {fe_bwd}")
+
+                    if acc_bwd != 0. and randnum - acc_fwd < acc_bwd:
+                        self.target_lambda = int(not self.target_lambda)
+                # trigger walker update
+                self.lambda_ = self.lambda_
+            else:
+                self.lambda_ = self.next_lambda
 
         return self.lambda_
 
@@ -269,7 +272,8 @@ class STSampler(_SMCSampler):
             current_cycle += 1
 
             lambdas = self.protocol.value
-            fe = sum(self.fe_estimator(lambdas[i], lambdas[i + 1]) for i in range(len(lambdas) - 1))
+            with self.fe_estimator.walker_memo.lock:
+                fe = sum(self.fe_estimator(lambdas[i], lambdas[i + 1]) for i in range(len(lambdas) - 1))
             _logger.info("Dimensionless free energy difference (-logZ) between lambda = 0 and lambda = 1 is: {}".
                          format(fe))
 

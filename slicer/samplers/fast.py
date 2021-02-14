@@ -11,7 +11,6 @@ _logger = _logging.getLogger(__name__)
 
 
 class FASTSampler(_STSampler):
-    # TODO: implement threading
     default_alchemical_functions = {
         'lambda_sterics': _LinearAlchemicalFunction(0, 0.5),
         'lambda_electrostatics': _LinearAlchemicalFunction(0.5, 1),
