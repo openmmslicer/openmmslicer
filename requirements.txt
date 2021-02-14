@@ -5,4 +5,5 @@ mdtraj
 numba
 numpy
 scipy
+stdio_proxy
 pandas

@@ -2,6 +2,21 @@ import functools as _functools
 import inspect as _inspect
 
 
+class LoggerWriter:
+    def __init__(self, level):
+        self.level = level
+        self.closed = False
+
+    def write(self, message):
+        if not isinstance(message, str):
+            message = message.decode()
+        if message != '\n':
+            self.level(message)
+
+    def flush(self):
+        pass
+
+
 def norecurse(default_return_value=None):
     def decorated_func(func):
         @_functools.wraps(func)
