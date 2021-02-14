@@ -1,4 +1,4 @@
-from slicer.decorators import *
+from slicer.misc import *
 
 
 def test_norecurse():
