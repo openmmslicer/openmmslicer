@@ -1,8 +1,8 @@
-import inspect as _inspect
 import logging as _logging
 
 import numpy as _np
 
+from slicer.decorators import norecurse as _norecurse
 from slicer.protocol import Protocol as _Protocol
 from slicer.transition_metrics import ExpectedRoundTripTime as _ExpectedRoundTripTime
 
@@ -57,14 +57,12 @@ class EffectiveDecorrelationTime:
     def protocol(self, val):
         self._protocol = val
 
+    @_norecurse(default_return_value=lambda self: self._last_value)
     def __call__(self):
         if self._last_update is not None and self._last_update == self.fe_estimator.walker_memo.timesteps:
             return self._last_value
         self._last_update = self.fe_estimator.walker_memo.timesteps
-        frames = _inspect.getouterframes(_inspect.currentframe())[1:]
-        recurse = any(x for x in frames if x.function == '__call__' and "self" in x.frame.f_locals.keys()
-                      and x.frame.f_locals["self"] is self)
-        if not recurse and self.protocol is not None:
+        if self.protocol is not None:
             if self.min_lambda is None:
                 self._last_value = None
             else:

@@ -7,6 +7,7 @@ import numpy as _np
 from scipy.interpolate import interp1d as _interp1d
 from simtk import unit as _unit
 
+from slicer.decorators import norecurse as _norecurse
 from slicer.transition_metrics import ExpectedRoundTripTime as _ExpectedRoundTripTime
 
 _logger = _logging.getLogger(__name__)
@@ -192,6 +193,7 @@ class OptimisableProtocol(Protocol):
 
         return protocol_curr, fun_curr, success
 
+    @_norecurse()
     def optimise(self, start=0., end=1., **kwargs):
         protocol, fun, success = self.optimiseDiscrete(start=start, end=end, **kwargs)
         if _np.isinf(fun) or _np.isnan(fun) or not success:
