@@ -2,7 +2,7 @@ import logging as _logging
 
 import numpy as _np
 
-from slicer.decorators import norecurse as _norecurse
+from slicer.misc import norecurse as _norecurse
 from slicer.protocol import Protocol as _Protocol
 from slicer.transition_metrics import ExpectedRoundTripTime as _ExpectedRoundTripTime
 

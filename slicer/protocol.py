@@ -7,7 +7,7 @@ import numpy as _np
 from scipy.interpolate import interp1d as _interp1d
 from simtk import unit as _unit
 
-from slicer.decorators import norecurse as _norecurse
+from slicer.misc import norecurse as _norecurse
 from slicer.transition_metrics import ExpectedRoundTripTime as _ExpectedRoundTripTime
 
 _logger = _logging.getLogger(__name__)

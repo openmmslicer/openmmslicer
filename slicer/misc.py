@@ -1,8 +1,10 @@
+import functools as _functools
 import inspect as _inspect
 
 
 def norecurse(default_return_value=None):
     def decorated_func(func):
+        @_functools.wraps(func)
         def wrapper(self, *args, **kwargs):
             frames = _inspect.getouterframes(_inspect.currentframe())[1:]
             recurse = any(x for x in frames if x.function == func.__name__ and "self" in x.frame.f_locals.keys() and
