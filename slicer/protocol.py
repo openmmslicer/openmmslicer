@@ -6,8 +6,9 @@ import cma as _cma
 import numpy as _np
 from scipy.interpolate import interp1d as _interp1d
 from simtk import unit as _unit
+import stdio_proxy as _stdio_proxy
 
-from slicer.misc import norecurse as _norecurse
+import slicer.misc as _misc
 from slicer.transition_metrics import ExpectedRoundTripTime as _ExpectedRoundTripTime
 
 _logger = _logging.getLogger(__name__)
@@ -154,15 +155,13 @@ class OptimisableProtocol(Protocol):
             sigma0 = min((x_end - x_start) / (N_internal - 2), 0.99)
 
             # minimise
-            stdout, stderr = _sys.stdout.write, _sys.stderr.write
-            _sys.stdout.write, _sys.stderr.write = _logger.debug, _logger.error
-            if x0.size == 1:
-                val = _cma.fmin(lambda x: f(x[:1]), _np.asarray(list(x0) * 2), sigma0=sigma0, options=kwargs)
-                protocol = [val[0][0]] if val is not None and val[1] < f0 else x0
-            else:
-                val = _cma.fmin(f, x0, sigma0=sigma0, options=kwargs)
-                protocol = list(val[0]) if val is not None and val[1] < f0 else x0
-            _sys.stdout.write, _sys.stderr.write = stdout, stderr
+            with _stdio_proxy.redirect_stdout(_misc.LoggerWriter(_logger.debug)):
+                if x0.size == 1:
+                    val = _cma.fmin(lambda x: f(x[:1]), _np.asarray(list(x0) * 2), sigma0=sigma0, options=kwargs)
+                    protocol = [val[0][0]] if val is not None and val[1] < f0 else x0
+                else:
+                    val = _cma.fmin(f, x0, sigma0=sigma0, options=kwargs)
+                    protocol = list(val[0]) if val is not None and val[1] < f0 else x0
 
             fun = val[1] if val is not None and val[1] < f0 else f0
             success = (val is not None)
@@ -193,7 +192,7 @@ class OptimisableProtocol(Protocol):
 
         return protocol_curr, fun_curr, success
 
-    @_norecurse()
+    @_misc.norecurse()
     def optimise(self, start=0., end=1., **kwargs):
         protocol, fun, success = self.optimiseDiscrete(start=start, end=end, **kwargs)
         if _np.isinf(fun) or _np.isnan(fun) or not success:
