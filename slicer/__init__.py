@@ -1,6 +1,7 @@
 # TODO: update docstrings
 from . import alchemy
 from . import correlation_metrics
+from . import decorators
 from . import fe_estimators
 from . import interpolate
 from . import moves
