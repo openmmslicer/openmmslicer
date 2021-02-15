@@ -73,6 +73,7 @@ class EffectiveDecorrelationTime:
                     tau += model.expectedTransitionTime(self.protocol, lambda0=self.min_lambda, lambda1=self.max_lambda,
                                                         target0=1, target1=0)
 
+                # TODO: use actual sampling time instead
                 if tau and not _np.isinf(tau) and not _np.isnan(tau):
                     n_lambdas = self.fe_estimator.walker_memo.timesteps - \
                                 _np.where(self.fe_estimator.walker_memo.timestep_lambdas == 1.)[0][0]
