@@ -1,6 +1,5 @@
 import functools as _functools
 import logging as _logging
-import sys as _sys
 
 import cma as _cma
 import numpy as _np
