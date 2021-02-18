@@ -614,7 +614,7 @@ class SMCSampler:
                 self.setState(walker)
                 transforms = self.moves.generateMoves(n_transforms_per_walker)
                 for t in transforms:
-                    walker_new = _Walker(i, state=walker.state, lambda_=self.lambda_, iteration=self.iteration(),
+                    walker_new = _Walker(i, state=walker.state, lambda_=walker.lambda_, iteration=walker.iteration,
                                          transform=t, reporter_filename=walker.reporter_filename,
                                          frame=walker.frame, logW=walker.logW)
                     new_walkers += [walker_new]
