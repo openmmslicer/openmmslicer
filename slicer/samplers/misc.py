@@ -12,9 +12,12 @@ from slicer.interpolate import BatchLinearInterp as _BatchLinearInterp
 
 
 class LinearAlchemicalFunction:
-    def __init__(self, start, end, full_interpolation=True):
+    def __init__(self, start, end, full_interpolation=True, extra_interpolation_points=None):
         self.boundaries = start, end
         self.full_interpolation = full_interpolation
+        if extra_interpolation_points is None:
+            extra_interpolation_points = []
+        self.extra_interpolation_points = extra_interpolation_points
 
     @property
     def boundaries(self):

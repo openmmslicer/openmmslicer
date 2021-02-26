@@ -42,6 +42,7 @@ class FASTSampler(_STSampler):
         for key, value in self.alchemical_functions.items():
             if value.full_interpolation:
                 lambdas |= {x for x in self.protocol.value if value.start <= x <= value.end}
+            lambdas |= set(value.extra_interpolation_points)
             lambdas |= set(value.boundaries)
         return _np.asarray(sorted(lambdas))
 
