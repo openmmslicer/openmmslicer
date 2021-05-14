@@ -52,3 +52,18 @@ def test_expectedRoundTripTime():
     assert np.isclose(ExpectedRoundTripTime.expectedRoundTripTime(obj, [0, 0.5, 1]), 10.646234070290262)
     obj.expectedTransitionMatrix.return_value = obj.expectedTransitionMatrix()[::-1, ::-1]
     assert np.isclose(ExpectedRoundTripTime.expectedRoundTripTime(obj, [0, 0.5, 1]), 10.646234070290262)
+
+
+def test_expectedTransitionTime():
+    # test described here: http://dx.doi.org/10.1080/0020739950260510
+    obj = Mock()
+    obj.expectedTransitionMatrix.return_value = np.asarray([
+        [.3, .1, .4, .2],
+        [.2, .5, .2, .1],
+        [.3, .2, .1, .4],
+        [0., .6, .3, .1],
+    ])
+    obj._cast.side_effect = lambda *args, **kwargs: ExpectedRoundTripTime._cast(*args, **kwargs)
+    obj.expectedTransitionTime.side_effect = lambda *args, **kwargs: \
+        ExpectedRoundTripTime.expectedTransitionTime(obj, *args, **kwargs)
+    assert np.isclose(ExpectedRoundTripTime.expectedTransitionTime(obj, [0, 0.5, 1], lambda0=1, lambda1=0), 6.3681592039801)

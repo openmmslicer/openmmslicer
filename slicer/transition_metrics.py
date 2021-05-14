@@ -114,16 +114,16 @@ class ExpectedRoundTripTime:
         else:
             if not (transition_matrix.shape[0] == transition_matrix.shape[1] == 2 * (lambdas.size - 1)):
                 raise ValueError("Invalid transition matrix shape supplied")
-        transition_matrix_del = _np.delete(_np.delete(transition_matrix, i, axis=0), i, axis=1)
+        transition_matrix_del = _np.delete(_np.delete(transition_matrix, j, axis=0), j, axis=1)
         if costs is None:
             costs = _np.ones(lambdas.shape)
         costs = _np.asarray([costs[0]] + [x for x in costs[1:-1] for _ in range(2)] + [costs[-1]])
         identity = _np.identity(transition_matrix_del.shape[0])
-        b = _np.delete(transition_matrix @ costs, i, axis=0)
-        j = j if j < i else j - 1
+        b = _np.delete(transition_matrix @ costs, j, axis=0)
+        i = i if j > i else i - 1
 
         try:
-            tau = _np.linalg.solve(identity - transition_matrix_del, b)[j]
+            tau = _np.linalg.solve(identity - transition_matrix_del, b)[i]
             if tau < 0:
                 tau = _np.inf
         except _np.linalg.LinAlgError:
