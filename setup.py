@@ -1,9 +1,13 @@
 from setuptools import setup
 
+with open('requirements.txt') as f:
+    requirements = f.read().splitlines()
+
 setup(
     name='slicer',
-    version='0.0.1',
+    version='1.0.0',
     packages=['slicer'],
+    install_requires=requirements,
     url='',
     license='GPL',
     author='Miroslav Suruzhon',
