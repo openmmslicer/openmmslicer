@@ -5,7 +5,7 @@ from scipy.spatial.transform import Rotation as _Rotation
 from simtk import openmm as _openmm
 from simtk import unit as _unit
 
-import slicer.resampling_methods as _resmethods
+import openmmslicer.resampling_methods as _resmethods
 
 
 class Move:

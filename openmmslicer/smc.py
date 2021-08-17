@@ -15,12 +15,12 @@ import simtk.openmm as _openmm
 import simtk.unit as _unit
 import simtk.openmm.app as _app
 
-import slicer.integrators as _integrators
-from slicer.minimise import GreedyBisectingMinimiser as _GreedyBisectingMinimiser
-import slicer.moves as _moves
-import slicer.resampling_metrics as _resmetrics
-import slicer.resampling_methods as _resmethods
-import slicer.sampling_metrics as _sammetrics
+import openmmslicer.integrators as _integrators
+from openmmslicer.minimise import GreedyBisectingMinimiser as _GreedyBisectingMinimiser
+import openmmslicer.moves as _moves
+import openmmslicer.resampling_metrics as _resmetrics
+import openmmslicer.resampling_methods as _resmethods
+import openmmslicer.sampling_metrics as _sammetrics
 
 _logger = _logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ class SequentialSampler:
         An object containing all structural information.
     integrator : openmm.Integrator
         The integrator which should be used during the sampling step.
-    moves : slicer.moves.MoveList or [slicer.moves.Move]
+    moves : openmmslicer.moves.MoveList or [openmmslicer.moves.Move]
         All moves which must be applied at lambda = 0.
     platform : str
         The platform which should be used for simulation.
@@ -234,12 +234,12 @@ class SequentialSampler:
         Parameters
         ----------
         sampling_metric : class
-            A sampling metric with callable methods as described in slicer.sampling_metrics. This metric is used
+            A sampling metric with callable methods as described in openmmslicer.sampling_metrics. This metric is used
             to adaptively determine the optimal sampling time. None removes adaptive sampling.
         resampling_method : class
-            A resampling method with callable methods as described in slicer.resampling_methods.
+            A resampling method with callable methods as described in openmmslicer.resampling_methods.
         resampling_metric : class
-            A resampling metric with callable methods as described in slicer.resampling_metrics. This metric is used
+            A resampling metric with callable methods as described in openmmslicer.resampling_metrics. This metric is used
             to adaptively determine the optimal next lambda. None removes adaptive resampling.
         target_metric_value : float
             The threshold for the resampling metric. None uses the default value given by the class.
