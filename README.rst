@@ -11,11 +11,11 @@ Monte Carlo (SMC) simulations which enhance the sampling of specific degrees of 
 Installation
 ------------
 
-This package requires OpenMM and OpenMMTools. Afterwards, it can be installed from ``pip``:
+This package requires OpenMM and OpenMMTools. Afterwards, it can be installed by running ``setup.py``:
 
 .. code-block:: bash
 
-    pip install openmmslicer
+    python setup.py install
 
 
 Getting Started
