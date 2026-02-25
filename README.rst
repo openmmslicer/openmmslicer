@@ -20,8 +20,8 @@ This package requires OpenMM and OpenMMTools. Afterwards, it can be installed by
 Getting Started
 ---------------
 
-Full docstring documentation can be found `here <https://openmmslicer.readthedocs.io/en/latest/index.html>`_.
-There are also a few `examples <https://openmmslicer.readthedocs.io/en/latest/Examples.html>`_ which you can run to
+Full docstring documentation can be found `here <https://openmmslicer-3.readthedocs.io/en/latest/index.html>`_.
+There are also a few `examples <https://openmmslicer-3.readthedocs.io/en/latest/Examples.html>`_ which you can run to
 see how OpenMMSLICER works.
 
 Contact
