@@ -220,7 +220,6 @@ class STSampler(_SMCSampler):
             deltaEs_fwd = self.calculateDeltaEs(self.next_lambda, self.lambda_)
             samples_fwd = _np.sum(_np.meshgrid(fe_fwd, -deltaEs_fwd), axis=0)
             acc_fwd = _np.average(_np.exp(_np.minimum(samples_fwd, 0.)))
-            _logger.debug(f"DeltaEs are {deltaEs_fwd}, samples fwd are {samples_fwd}")
             _logger.debug(f"Forward probability to lambda = {self.next_lambda} is {acc_fwd} with dimensionless "
                           f"free energy = {fe_fwd}")
 
@@ -228,30 +227,23 @@ class STSampler(_SMCSampler):
             randnum = _random.random()
             _logger.debug(f"The random number is: {randnum}")
             if acc_fwd != 1. and randnum >= acc_fwd:
-                _logger.debug(f"Checking for bwd...")
                 if not _math.isclose(self.next_lambda, self.previous_lambda):
                     fe_bwd = self.fe_estimator(self.lambda_, self.previous_lambda)
                     deltaEs_bwd = self.calculateDeltaEs(self.previous_lambda, self.lambda_)
                     samples_bwd = _np.sum(_np.meshgrid(fe_bwd, -deltaEs_bwd), axis=0)
                     acc_bwd = max(0., _np.average(_np.exp(_np.minimum(samples_bwd, 0.))) - acc_fwd)
-                    _logger.debug(f"DeltaEs bwd are {deltaEs_bwd}, samples bwd are {samples_bwd}")
                     _logger.debug(f"Backward probability to lambda = {self.previous_lambda} is {acc_bwd} with "
                                   f"dimensionless free energy = {fe_bwd}")
 
                     if acc_bwd != 0. and randnum - acc_fwd < acc_bwd:
-                        _logger.debug(f"acc_bwd != 0. and randnum - acc_fwd < acc_bwd, switching directions")
                         self.target_lambda = int(not self.target_lambda)
-                        _logger.debug(f"Direction is towards {self.target_lambda}")
 
                 # trigger walker update
                 self.lambda_ = self.lambda_
-                _logger.debug(f"self.lambda_ = self.lambda_, move rejected")
             else:
                 self.lambda_ = self.next_lambda
-                _logger.debug(f"self.lambda_ = self.next_lambda, move accepted")
                 if self.lambda_ == 1.0 or self.lambda_ == 0.0:
                     self.target_lambda = int(not self.lambda_)
-                    _logger.debug(f"Direction is towards {self.target_lambda}")
         return self.lambda_
 
     def run(self,
