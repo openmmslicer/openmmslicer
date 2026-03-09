@@ -26,7 +26,7 @@ author = 'Miroslav Suruzhon'
 # The short X.Y version
 version = ''
 # The full version, including alpha/beta/rc tags
-release = '1.0.0'
+release = '3.0.0'
 
 
 # -- General configuration ---------------------------------------------------
@@ -48,7 +48,7 @@ extensions = [
 ]
 
 autodoc_default_flags = ['members']
-autodoc_mock_imports = ["mdtraj", "numpy", "openmmtools", "scipy"]
+#autodoc_mock_imports = ["mdtraj", "numpy", "openmm", "openmmtools", "scipy", "dill", "cachetools", "cached_property", "pandas", "cma", "stdio_proxy", "numba"]
 autosummary_generate = True
 
 # Add any paths that contain templates here, relative to this directory.

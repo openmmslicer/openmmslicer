@@ -1,8 +1,7 @@
 openmmslicer.minimise module
-============================
+=====================================
 
-This module contains the :class:`~openmmslicer.minimise.GreedyBisectingMinimiser` class which is used for adaptively
-creating an alchemical protocol.
+Custom bisection-based minimiser used to adaptively find the next λ during the AASMC cycle.
 
 .. automodule:: openmmslicer.minimise
    :members:

@@ -7,22 +7,24 @@ class EnergyCorrelation:
 
     Parameters
     ----------
-    ensemble : slicer.smc.SequentialSampler
+    ensemble : openmmslicer.smc.SMCSampler
         A sampler, containing all of the information of the system.
 
     Attributes
     ----------
-    ensemble : slicer.smc.SequentialSampler
+    ensemble : openmmslicer.smc.SMCSampler
         The associated SMC sampler.
     E_before : [float]
         A list of all reduced initial potential energies for each walker.
     E_after : [float]
         A list of all reduced current potential energies for each walker.
     """
-    def __init__(self, ensemble):
+    def __init__(self, ensemble, min=-0.1, max=0.1):
         self.ensemble = ensemble
         self.E_before = []
         self.E_after = []
+        self.min = min
+        self.max = max
 
     def evaluateBefore(self):
         """Evaluates the energies immediately after resampling."""
@@ -36,16 +38,6 @@ class EnergyCorrelation:
     def requireNextLambda(self):
         """bool: Whether a potentially expensive calculation of the next lambda value is needed."""
         return False
-
-    @property
-    def min(self):
-        """float: The minimum value of the metric. Default is -0.1."""
-        return -0.1
-
-    @property
-    def max(self):
-        """float: The maximum value of the metric. Default is 0.1."""
-        return 0.1
 
     @property
     def metric(self):

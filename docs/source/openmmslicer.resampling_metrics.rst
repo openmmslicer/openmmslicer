@@ -1,8 +1,8 @@
 openmmslicer.resampling\_metrics module
 =======================================
 
-This module contains different resampling metrics, which can be used to assess the quality of distribution overlap
-between different steps of the SMC procedure.
+Contains different resampling metrics, which can be used to assess the quality of distribution overlap
+between different steps of the FAST procedure.
 
 .. automodule:: openmmslicer.resampling_metrics
    :members:

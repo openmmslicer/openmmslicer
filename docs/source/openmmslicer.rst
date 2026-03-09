@@ -6,12 +6,19 @@ Here you can find all functions and classes in OpenMMSLICER. Alternatively, you 
 
 
 .. toctree::
-   :maxdepth: 4
+   :maxdepth: 2
 
-   openmmslicer.integrators
+   openmmslicer.alchemy
+   openmmslicer.samplers
+   openmmslicer.correlation_metrics
+   openmmslicer.fe_estimators
+   openmmslicer.interpolate
    openmmslicer.minimise
+   openmmslicer.misc
    openmmslicer.moves
+   openmmslicer.protocol
+   openmmslicer.reporters
    openmmslicer.resampling_methods
    openmmslicer.resampling_metrics
    openmmslicer.sampling_metrics
-   openmmslicer.smc
+   openmmslicer.transition_metrics
