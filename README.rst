@@ -1,6 +1,15 @@
 OpenMMSLICER
 ============
 
+.. note::
+
+OpenMMSLICER is now maintained at:
+
+https://github.com/essex-lab/OpenMMSLICER
+
+Please use this repository for the latest source code, issues, and development updates.
+
+
 About
 -----
 
